@@ -14,11 +14,11 @@
 package backend
 
 import (
-	"bk-bcs/bcs-common/common/blog"
-	sched "bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/scheduler"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/task"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 	"errors"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	commontypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/task"
 	"time"
 )
 
@@ -30,36 +30,47 @@ func (b *backend) LaunchApplication(version *types.Version) error {
 	blog.V(3).Infof("launch application(%s.%s)", version.RunAs, version.ID)
 
 	runAs := version.RunAs
-	appId := version.ID
-	b.store.LockApplication(runAs + "." + appId)
-	defer b.store.UnLockApplication(runAs + "." + appId)
+	appID := version.ID
+	b.store.LockApplication(runAs + "." + appID)
+	defer b.store.UnLockApplication(runAs + "." + appID)
 
-	app, err := b.store.FetchApplication(runAs, appId)
+	app, err := b.store.FetchApplication(runAs, appID)
 	if err != nil {
-		blog.Error("launch application(%s.%s) err: %s", runAs, appId, err.Error())
+		blog.Error("launch application(%s.%s) err: %s", runAs, appID, err.Error())
 		return err
 	}
 	if app == nil {
-		blog.Error("launch application(%s.%s) err, application not found", runAs, appId)
+		blog.Error("launch application(%s.%s) err, application not found", runAs, appID)
 		return errors.New("Application not found")
 	}
 
-	launchTrans := sched.CreateTransaction()
-	launchTrans.LifePeriod = sched.TRANSACTION_APPLICATION_LAUNCH_LIFEPERIOD
-	launchTrans.RunAs = version.RunAs
-	launchTrans.AppID = version.ID
-	launchTrans.OpType = types.OPERATION_LAUNCH
-	launchTrans.Status = types.OPERATION_STATUS_INIT
-	var launchOpdata sched.TransAPILaunchOpdata
-	launchOpdata.Version = version
-	launchOpdata.LaunchedNum = 0
-	launchOpdata.NeedResource = version.AllResource()
-	launchOpdata.Reason = "request launch"
-	launchTrans.OpData = &launchOpdata
+	launchTrans := &types.Transaction{
+		ObjectKind:    string(commontypes.BcsDataType_APP),
+		ObjectName:    appID,
+		Namespace:     runAs,
+		TransactionID: types.GenerateTransactionID(string(commontypes.BcsDataType_APP)),
+		CreateTime:    time.Now(),
+		CheckInterval: time.Second,
+		CurOp: &types.TransactionOperartion{
+			OpType: types.TransactionOpTypeLaunch,
+			OpLaunchData: &types.TransAPILaunchOpdata{
+				Version:      version,
+				LaunchedNum:  0,
+				NeedResource: version.AllResource(),
+				Reason:       "request launch",
+			},
+		},
+		Status: types.OPERATION_STATUS_INIT,
+	}
 
-	go b.sched.RunLaunchApplication(launchTrans)
+	if err := b.store.SaveTransaction(launchTrans); err != nil {
+		blog.Errorf("save transaction(%s,%s) into db failed, err %s", runAs, appID, err.Error())
+		return err
+	}
 
-	app.RawJson = version.RawJson
+	b.sched.PushEventQueue(launchTrans)
+
+	//app.RawJson = version.RawJson
 	app.LastStatus = app.Status
 	app.Status = types.APP_STATUS_OPERATING
 	app.SubStatus = types.APP_SUBSTATUS_UNKNOWN
@@ -67,7 +78,7 @@ func (b *backend) LaunchApplication(version *types.Version) error {
 	app.Message = "application in launching"
 	if err := b.store.SaveApplication(app); err != nil {
 		blog.Error("save application(%s.%s) status(%s) into db err: %s",
-			runAs, appId, app.Status, err.Error())
+			runAs, appID, app.Status, err.Error())
 		return err
 	}
 
@@ -79,52 +90,62 @@ func (b *backend) RecoverApplication(version *types.Version) error {
 	blog.Info("recover application(%s.%s) to instances(%d)",
 		version.RunAs, version.ID, version.Instances)
 	runAs := version.RunAs
-	appId := version.ID
-	b.store.LockApplication(runAs + "." + appId)
-	defer b.store.UnLockApplication(runAs + "." + appId)
+	appID := version.ID
+	b.store.LockApplication(runAs + "." + appID)
+	defer b.store.UnLockApplication(runAs + "." + appID)
 
-	app, err := b.store.FetchApplication(runAs, appId)
+	app, err := b.store.FetchApplication(runAs, appID)
 	if err != nil {
-		blog.Error("recover application(%s.%s) err %s", runAs, appId, err.Error())
+		blog.Error("recover application(%s.%s) err %s", runAs, appID, err.Error())
 		return err
 	}
 	if app == nil {
-		blog.Error("recover application(%s.%s) err, application not found", runAs, appId)
+		blog.Error("recover application(%s.%s) err, application not found", runAs, appID)
 		return errors.New("Application not found")
 	}
 
 	blog.Info("recover application(%s.%s) from instance %d to  %d",
-		runAs, appId, app.Instances, version.Instances)
+		runAs, appID, app.Instances, version.Instances)
 
 	if app.Instances >= uint64(version.Instances) {
 		app.LastStatus = app.Status
 		app.Status = types.APP_STATUS_RUNNING
 		app.SubStatus = types.APP_SUBSTATUS_UNKNOWN
 		app.UpdateTime = time.Now().Unix()
-		app.Message = "application is running"
+		app.Message = types.APP_STATUS_RUNNING_STR
 		if err := b.store.SaveApplication(app); err != nil {
 			blog.Error("save application(%s.%s) status(%s) into db err:%s, recover fail",
-				runAs, appId, app.Status, err.Error())
+				runAs, appID, app.Status, err.Error())
 			return err
 		}
 		return nil
 	}
 
-	launchTrans := sched.CreateTransaction()
-	launchTrans.LifePeriod = sched.TRANSACTION_APPLICATION_LAUNCH_LIFEPERIOD
-	launchTrans.RunAs = version.RunAs
-	launchTrans.AppID = version.ID
-	launchTrans.OpType = types.OPERATION_LAUNCH
-	launchTrans.Status = types.OPERATION_STATUS_INIT
-	launchTrans.DelayTime = 8
-	var launchOpdata sched.TransAPILaunchOpdata
-	launchOpdata.Version = version
-	launchOpdata.LaunchedNum = int(app.Instances)
-	launchOpdata.NeedResource = version.AllResource()
-	launchOpdata.Reason = "recover"
-	launchTrans.OpData = &launchOpdata
+	launchTrans := &types.Transaction{
+		ObjectKind:    string(commontypes.BcsDataType_APP),
+		ObjectName:    version.ID,
+		Namespace:     version.RunAs,
+		TransactionID: types.GenerateTransactionID(string(commontypes.BcsDataType_APP)),
+		CreateTime:    time.Now(),
+		CheckInterval: time.Second,
+		CurOp: &types.TransactionOperartion{
+			OpType: types.TransactionOpTypeLaunch,
+			OpLaunchData: &types.TransAPILaunchOpdata{
+				Version:      version,
+				LaunchedNum:  int(app.Instances),
+				NeedResource: version.AllResource(),
+				Reason:       "recover",
+			},
+		},
+		Status: types.OPERATION_STATUS_INIT,
+	}
 
-	go b.sched.RunLaunchApplication(launchTrans)
+	if err := b.store.SaveTransaction(launchTrans); err != nil {
+		blog.Errorf("save transaction(%s,%s) into db failed, err %s", runAs, appID, err.Error())
+		return err
+	}
+
+	b.sched.PushEventQueue(launchTrans)
 
 	app.LastStatus = app.Status
 	app.Status = types.APP_STATUS_OPERATING
@@ -133,7 +154,7 @@ func (b *backend) RecoverApplication(version *types.Version) error {
 	app.Message = "application in recovering"
 	if err := b.store.SaveApplication(app); err != nil {
 		blog.Error("save application(%s.%s) status(%s) into db err:%s, recover fail",
-			runAs, appId, app.Status, err.Error())
+			runAs, appID, app.Status, err.Error())
 		return err
 	}
 

@@ -14,14 +14,19 @@
 package events
 
 import (
-	"bk-bcs/bcs-common/common"
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-services/bcs-storage/storage/actions"
-	"bk-bcs/bcs-services/bcs-storage/storage/actions/lib"
-	"bk-bcs/bcs-services/bcs-storage/storage/apiserver"
-	"bk-bcs/bcs-services/bcs-storage/storage/operator"
+	"context"
+	"time"
 
 	"github.com/emicklei/go-restful"
+
+	"github.com/Tencent/bk-bcs/bcs-common/common"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/tracing/utils"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/actions"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/actions/lib"
+	v1http "github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/actions/v1http/utils"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/apiserver"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/clean"
 )
 
 const (
@@ -37,7 +42,7 @@ const (
 	componentTag  = "component"
 	typeTag       = "type"
 	describeTag   = "describe"
-	clusterIdTag  = "clusterId"
+	clusterIDTag  = "clusterId"
 	extraInfoTag  = "extraInfo"
 	offsetTag     = "offset"
 	limitTag      = "length"
@@ -46,53 +51,92 @@ const (
 	createTimeTag = "createTime"
 	eventTimeTag  = "eventTime"
 	timeLayout    = "2006-01-02 15:04:05"
+
+	nameSpaceTag    = "namespace"
+	resourceTypeTag = "resourceType"
+	resourceKindTag = "resourceKind"
+	resourceNameTag = "resourceName"
+
+	EventResource = "Event"
 )
 
 var needTimeFormatList = [...]string{createTimeTag, eventTimeTag}
-var conditionTagList = [...]string{idTag, envTag, kindTag, levelTag, componentTag, typeTag, clusterIdTag, "extraInfo.name", "extraInfo.namespace", "extraInfo.kind"}
+var conditionTagList = [...]string{
+	idTag, envTag, kindTag, levelTag, componentTag, typeTag, clusterIDTag,
+	"extraInfo.name", "extraInfo.namespace", "extraInfo.kind"}
+var eventFeatTags = []string{idTag, envTag, kindTag, levelTag, componentTag, typeTag,
+	clusterIDTag, nameSpaceTag, resourceTypeTag, resourceKindTag, resourceNameTag}
 
 // Use Mongodb for storage.
-const dbConfig = "event"
+const dbConfig = "mongodb/event"
 
-var getNewTank operator.GetNewTank = lib.GetMongodbTank(dbConfig)
-
+// PutEvent put event
 func PutEvent(req *restful.Request, resp *restful.Response) {
-	request := newReqEvent(req)
-	defer request.exit()
-	if err := request.insert(); err != nil {
+	const (
+		handler = "PutEvent"
+	)
+	span := v1http.SetHTTPSpanContextInfo(req, handler)
+	defer span.Finish()
+
+	if err := insert(req); err != nil {
+		utils.SetSpanLogTagError(span, err)
 		blog.Errorf("%s | err: %v", common.BcsErrStoragePutResourceFailStr, err)
-		lib.ReturnRest(&lib.RestResponse{Resp: resp, ErrCode: common.BcsErrStoragePutResourceFail, Message: common.BcsErrStoragePutResourceFailStr})
+		lib.ReturnRest(&lib.RestResponse{
+			Resp:    resp,
+			ErrCode: common.BcsErrStoragePutResourceFail,
+			Message: common.BcsErrStoragePutResourceFailStr})
 		return
 	}
 	lib.ReturnRest(&lib.RestResponse{Resp: resp})
 }
 
+// ListEvent list event
 func ListEvent(req *restful.Request, resp *restful.Response) {
-	request := newReqEvent(req)
-	defer request.exit()
-	r, total, err := request.listEvent()
+	const (
+		handler = "ListEvent"
+	)
+	span := v1http.SetHTTPSpanContextInfo(req, handler)
+	defer span.Finish()
+
+	r, total, err := listEvent(req)
 	extra := map[string]interface{}{"total": total}
 	if err != nil {
+		utils.SetSpanLogTagError(span, err)
 		blog.Errorf("%s | err: %v", common.BcsErrStorageListResourceFailStr, err)
-		lib.ReturnRest(&lib.RestResponse{Resp: resp, Data: []string{}, ErrCode: common.BcsErrStorageListResourceFail, Message: common.BcsErrStorageListResourceFailStr, Extra: extra})
+		lib.ReturnRest(&lib.RestResponse{
+			Resp: resp, Data: []string{},
+			ErrCode: common.BcsErrStorageListResourceFail,
+			Message: common.BcsErrStorageListResourceFailStr, Extra: extra})
 		return
 	}
 	lib.ReturnRest(&lib.RestResponse{Resp: resp, Data: r, Extra: extra})
 }
 
-func CleanEventsOutDate() {
-	cleanEventOutDate(apiserver.GetAPIResource().Conf.EventMaxTime)
+// WatchEvent watch event
+func WatchEvent(req *restful.Request, resp *restful.Response) {
+	watch(req, resp)
 }
 
-func CleanEventsOutCap() {
-	cleanEventOutCap(apiserver.GetAPIResource().Conf.EventMaxCap)
+// CleanEvents clean event
+func CleanEvents() {
+	maxCap := apiserver.GetAPIResource().Conf.EventMaxCap
+	maxTime := apiserver.GetAPIResource().Conf.EventMaxTime
+	cleaner := clean.NewDBCleaner(apiserver.GetAPIResource().GetDBClient(dbConfig), tableName, time.Hour)
+	cleaner.WithMaxEntryNum(maxCap)
+	cleaner.WithMaxDuration(time.Duration(maxTime*24)*time.Hour, createTimeTag)
+	cleaner.Run(context.TODO())
 }
 
 func init() {
 	eventPath := urlPath("/events")
-	actions.RegisterV1Action(actions.Action{"PUT", eventPath, nil, lib.MarkProcess(PutEvent)})
-	actions.RegisterV1Action(actions.Action{"GET", eventPath, nil, lib.MarkProcess(ListEvent)})
+	actions.RegisterV1Action(actions.Action{
+		Verb: "PUT", Path: eventPath, Params: nil, Handler: lib.MarkProcess(PutEvent)})
+	actions.RegisterV1Action(actions.Action{
+		Verb: "GET", Path: eventPath, Params: nil, Handler: lib.MarkProcess(ListEvent)})
 
-	actions.RegisterDaemonFunc(CleanEventsOutDate)
-	actions.RegisterDaemonFunc(CleanEventsOutCap)
+	eventWatchPath := urlPath("/events/watch")
+	actions.RegisterV1Action(actions.Action{
+		Verb: "POST", Path: eventWatchPath, Params: nil, Handler: lib.MarkProcess(WatchEvent)})
+
+	actions.RegisterDaemonFunc(CleanEvents)
 }

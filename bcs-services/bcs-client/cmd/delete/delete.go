@@ -14,25 +14,24 @@
 package delete
 
 import (
-	"fmt"
-
-	"bk-bcs/bcs-services/bcs-client/cmd/utils"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/utils"
 
 	"github.com/urfave/cli"
 )
 
+//NewDeleteCommand delete sub command
 func NewDeleteCommand() cli.Command {
 	return cli.Command{
 		Name:  "delete",
-		Usage: "delete app/process/taskgroup/configmap/service/secret/deployment",
+		Usage: "delete app/process/taskgroup/configmap/service/secret/deployment/crd/daemonset/meshcluster/logcollectiontask",
 		Flags: []cli.Flag{
 			cli.StringFlag{
 				Name:  "type, t",
-				Usage: "Delete type, app/taskgroup/configmap/service/secret/deployment",
+				Usage: "Delete type, app/taskgroup/configmap/service/secret/deployment/crd/daemonset/meshcluster/logcollectiontask",
 			},
 			cli.StringFlag{
 				Name:  "name, n",
-				Usage: "Application name",
+				Usage: "resource name",
 			},
 			cli.StringFlag{
 				Name:  "namespace, ns",
@@ -50,10 +49,7 @@ func NewDeleteCommand() cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			if err := deleteF(utils.NewClientContext(c)); err != nil {
-				return err
-			}
-			return nil
+			return deleteF(utils.NewClientContext(c))
 		},
 	}
 }
@@ -78,7 +74,16 @@ func deleteF(c *utils.ClientContext) error {
 		return deleteService(c)
 	case "deploy", "deployment":
 		return deleteDeployment(c)
+	case "crd", "customresourcedefinition":
+		return deleteCustomResourceDefinition(c)
+	case "daemonset":
+		return deleteDaemonset(c)
+	case "logcollectiontask":
+		return deleteLogCollectionTask(c)
+	case "meshcluster":
+		return deleteMeshCluster(c)
 	default:
-		return fmt.Errorf("invalid type: %s", resourceType)
+		//unkown type, try Custom Resource
+		return deleteCustomResource(c)
 	}
 }

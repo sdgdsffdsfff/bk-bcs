@@ -14,17 +14,21 @@
 package v4http
 
 import (
-	"bk-bcs/bcs-common/common"
-	"bk-bcs/bcs-common/common/blog"
-	bhttp "bk-bcs/bcs-common/common/http"
-	bcstype "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 	"encoding/json"
+	"fmt"
+	"github.com/Tencent/bk-bcs/bcs-common/common"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	bhttp "github.com/Tencent/bk-bcs/bcs-common/common/http"
+	bcstype "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	commtypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+
 	//"github.com/golang/protobuf/proto"
 	"strconv"
 	"strings"
 )
 
+//CreateApplication create application implementation
 func (s *Scheduler) CreateApplication(body []byte) (string, error) {
 	blog.Info("create application. param(%s)", string(body))
 	var param bcstype.ReplicaController
@@ -41,7 +45,7 @@ func (s *Scheduler) CreateApplication(body []byte) (string, error) {
 		return err.Error(), err
 	}
 
-	version.RawJson = &param
+	//version.RawJson = &param
 	// post version to bcs-mesos-scheduler, /v1/apps
 	data, err := json.Marshal(version)
 	if err != nil {
@@ -52,7 +56,7 @@ func (s *Scheduler) CreateApplication(body []byte) (string, error) {
 
 	if s.GetHost() == "" {
 		blog.Error("no scheduler is connected by driver")
-		err := bhttp.InternalError(common.BcsErrCommHttpDo, common.BcsErrCommHttpDoStr+"scheduler not exist")
+		err = bhttp.InternalError(common.BcsErrCommHttpDo, common.BcsErrCommHttpDoStr+"scheduler not exist")
 		return err.Error(), err
 	}
 
@@ -71,6 +75,11 @@ func (s *Scheduler) CreateApplication(body []byte) (string, error) {
 }
 
 func (s *Scheduler) newVersionWithParam(param *bcstype.ReplicaController) (*types.Version, error) {
+	//check ObjectMeta is valid
+	err := param.MetaIsValid()
+	if err != nil {
+		return nil, err
+	}
 
 	//var version types.Version
 	version := &types.Version{
@@ -87,6 +96,8 @@ func (s *Scheduler) newVersionWithParam(param *bcstype.ReplicaController) (*type
 		Mode:        "",
 	}
 
+	//store ReplicaController original definition
+	version.RawJson = param
 	version.ObjectMeta = param.ObjectMeta
 	version.KillPolicy = &param.KillPolicy
 
@@ -113,7 +124,7 @@ func (s *Scheduler) newVersionWithParam(param *bcstype.ReplicaController) (*type
 		version.Labels[k] = v
 	}
 
-	version, err := s.setVersionWithPodSpec(version, param.ReplicaControllerSpec.Template)
+	version, err = s.setVersionWithPodSpec(version, param.ReplicaControllerSpec.Template)
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +135,12 @@ func (s *Scheduler) newVersionWithParam(param *bcstype.ReplicaController) (*type
 		if strings.Contains(k, "io.tencent.bcs.netsvc.requestip.") {
 			val := strings.Replace(v, " ", "", -1)
 			version.Labels[k] = val
+		}
+	}
+	for k, v := range version.ObjectMeta.Annotations {
+		if strings.Contains(k, "io.tencent.bcs.netsvc.requestip.") {
+			val := strings.Replace(v, " ", "", -1)
+			version.ObjectMeta.Annotations[k] = val
 		}
 	}
 
@@ -148,6 +165,14 @@ func (s *Scheduler) setVersionWithPodSpec(version *types.Version, spec *bcstype.
 		blog.Warn("containers and Processes can not coexist.")
 		replyErr := bhttp.InternalError(common.BcsErrMesosDriverParameterErr, common.BcsErrMesosDriverParameterErrStr+"containers and processes cannot coexist")
 		return nil, replyErr
+	}
+	//version belong to application
+	if version.Kind == "" && NumContainer > 0 {
+		version.Kind = commtypes.BcsDataType_APP
+	}
+	//version belong to process
+	if version.Kind == "" && NumProcess > 0 {
+		version.Kind = commtypes.BcsDataType_PROCESS
 	}
 
 	version.PodObjectMeta = spec.ObjectMeta
@@ -188,23 +213,25 @@ func (s *Scheduler) setVersionWithPodSpec(version *types.Version, spec *bcstype.
 
 		container.Type = c.Type
 		//Resources
+		//request
 		container.Resources = new(types.Resource)
 		container.Resources.Cpus, _ = strconv.ParseFloat(c.Resources.Requests.Cpu, 64)
 		container.Resources.Mem, _ = strconv.ParseFloat(c.Resources.Requests.Mem, 64)
 		container.Resources.Disk, _ = strconv.ParseFloat(c.Resources.Requests.Storage, 64)
-
-		//limit resuroces
+		//limit
 		container.LimitResoures = new(types.Resource)
 		container.LimitResoures.Cpus, _ = strconv.ParseFloat(c.Resources.Limits.Cpu, 64)
 		container.LimitResoures.Mem, _ = strconv.ParseFloat(c.Resources.Limits.Mem, 64)
 		container.LimitResoures.Disk, _ = strconv.ParseFloat(c.Resources.Limits.Storage, 64)
-
 		container.DataClass = &types.DataClass{
 			Resources: new(types.Resource),
 			Msgs:      []*types.BcsMessage{},
 		}
-
+		//extended resources
+		container.DataClass.ExtendedResources = c.Resources.ExtendedResources
+		//request resources
 		container.DataClass.Resources = container.Resources
+		//limit resources
 		container.DataClass.LimitResources = container.LimitResoures
 
 		//set network flow limit parameters
@@ -252,7 +279,23 @@ func (s *Scheduler) setVersionWithPodSpec(version *types.Version, spec *bcstype.
 		//env
 		container.Docker.Env = make(map[string]string)
 		for _, env := range c.Env {
-			container.Docker.Env[env.Name] = env.Value
+			if env.ValueFrom != nil && env.ValueFrom.ResourceFieldRef != nil && env.ValueFrom.ResourceFieldRef.Resource != "" {
+				switch env.ValueFrom.ResourceFieldRef.Resource {
+				case "requests.cpu":
+					container.Docker.Env[env.Name] = fmt.Sprintf("%f", container.Resources.Cpus*1000)
+				case "requests.memory":
+					container.Docker.Env[env.Name] = fmt.Sprintf("%f", container.Resources.Mem)
+				case "limits.cpu":
+					container.Docker.Env[env.Name] = fmt.Sprintf("%f", container.LimitResoures.Cpus*1000)
+				case "limits.memory":
+					container.Docker.Env[env.Name] = fmt.Sprintf("%f", container.LimitResoures.Mem)
+				default:
+					blog.Errorf("Deployment(%s:%s) Env(%s) ValueFrom(%s) is invalid",
+						version.ObjectMeta.NameSpace, version.ObjectMeta.Name, env.Name, env.ValueFrom.ResourceFieldRef.Resource)
+				}
+			} else {
+				container.Docker.Env[env.Name] = env.Value
+			}
 		}
 
 		//volume
@@ -286,9 +329,9 @@ func (s *Scheduler) setVersionWithPodSpec(version *types.Version, spec *bcstype.
 			if oneCheck.TimeoutSeconds <= 0 {
 				oneCheck.TimeoutSeconds = 20
 			}
-			if oneCheck.ConsecutiveFailures < 0 {
-				oneCheck.ConsecutiveFailures = 0
-			}
+			// if oneCheck.ConsecutiveFailures < 0 {
+			// 	oneCheck.ConsecutiveFailures = 0
+			// }
 			if oneCheck.GracePeriodSeconds <= 0 {
 				oneCheck.GracePeriodSeconds = 300
 			}

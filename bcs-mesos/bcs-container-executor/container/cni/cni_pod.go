@@ -14,11 +14,6 @@
 package cni
 
 import (
-	comtypes "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-mesos/bcs-container-executor/container"
-	"bk-bcs/bcs-mesos/bcs-container-executor/logs"
-	"bk-bcs/bcs-mesos/bcs-container-executor/util"
-	bcstypes "bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 	"bytes"
 	"fmt"
 	"io/ioutil"
@@ -28,8 +23,18 @@ import (
 	"sync"
 	"time"
 
+	comtypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/common/util"
+	bcstypes "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/container"
+	devicepluginmanager "github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/devicepluginmanager"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/extendedresource"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/healthcheck"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/logs"
+	exeutil "github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/util"
+
 	//"github.com/pborman/uuid"
-	schedTypes "bk-bcs/bcs-mesos/bcs-scheduler/src/types"
+	schedTypes "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
 
 	"golang.org/x/net/context"
 )
@@ -67,7 +72,8 @@ const (
 
 //NewPod create CNIPod instance with container interaface and container info
 func NewPod(operator container.Container, tasks []*container.BcsContainerTask,
-	handler *container.PodEventHandler, netImage string) container.Pod {
+	handler *container.PodEventHandler, netImage string,
+	extendedResourceDriver *extendedresource.Driver) container.Pod {
 
 	if len(tasks) == 0 {
 		logs.Errorf("Create CNIPod error, Container tasks are 0")
@@ -92,6 +98,9 @@ func NewPod(operator container.Container, tasks []*container.BcsContainerTask,
 		conTasks:         taskMap,
 		networkTaskId:    tasks[0].TaskId,
 		runningContainer: make(map[string]*container.BcsContainerInfo),
+		resourceManager: devicepluginmanager.NewResourceManager(
+			devicepluginmanager.NewDevicePluginManager(),
+			extendedResourceDriver),
 	}
 	if len(tasks[0].NetworkIPAddr) != 0 {
 		//ip injected by executor
@@ -134,6 +143,8 @@ type CNIPod struct {
 	NetLimit      *comtypes.NetLimit
 	networkTaskId string
 	netImage      string
+	//device plugin manager
+	resourceManager *devicepluginmanager.ResourceManager
 }
 
 //IsHealthy check pod is healthy
@@ -236,7 +247,7 @@ func (p *CNIPod) Init() error {
 	}
 
 	if p.cniHostName == "" {
-		p.cniHostName = "pod-" + util.RandomString(12)
+		p.cniHostName = "pod-" + exeutil.RandomString(12)
 	}
 
 	p.netTask = &container.BcsContainerTask{
@@ -249,8 +260,7 @@ func (p *CNIPod) Init() error {
 		HostName:       p.cniHostName,
 	}
 	p.netTask.Resource = &bcstypes.Resource{
-		Cpus:   1,
-		CPUSet: 0, //No Numa feature
+		Cpus: 1,
 	}
 
 	netflag := container.BcsKV{
@@ -270,6 +280,7 @@ func (p *CNIPod) Init() error {
 	for _, task := range p.conTasks {
 		p.netTask.Labels = append(p.netTask.Labels, task.Labels...)
 	}
+
 	//step 2: starting network container
 	var createErr error
 	if p.networkName == "host" {
@@ -329,6 +340,14 @@ func (p *CNIPod) Finit() error {
 		logs.Infof("CNIPod finit network container %s success\n", p.netTask.RuntimeConf.ID)
 		return nil
 	}
+	for _, task := range p.conTasks {
+		for _, ex := range task.ExtendedResources {
+			if err := p.resourceManager.ReleaseExtendedResources(ex.Name, task.TaskId); err != nil {
+				// do not break
+				logs.Errorf("release extended resources %v failed, err %s", ex, err.Error())
+			}
+		}
+	}
 	logs.Infoln("CNIPod nothing can be finit.")
 	return nil
 }
@@ -383,6 +402,37 @@ func (p *CNIPod) Start() error {
 
 		hostname := task.HostName
 		task.HostName = ""
+		var extendedErr error
+		//if task contains extended resources, need connect device plugin to allocate resources
+		for _, ex := range task.ExtendedResources {
+			logs.Infof("task %s contains extended resource %s, then allocate it", task.TaskId, ex.Name)
+			envs, err := p.resourceManager.ApplyExtendedResources(ex, task.TaskId)
+			if err != nil {
+				logs.Errorf("apply extended resource failed, err %s", err.Error())
+				extendedErr = err
+				break
+			}
+			logs.Infof("add env %v for task %s", envs, task.TaskId)
+
+			//append response docker envs to task.envs
+			for k, v := range envs {
+				kv := container.BcsKV{
+					Key:   k,
+					Value: v,
+				}
+				task.Env = append(task.Env, kv)
+			}
+		}
+
+		//if allocate extended resource failed, then return and exit
+		if extendedErr != nil {
+			logs.Errorf(extendedErr.Error())
+			task.RuntimeConf.Status = container.ContainerStatus_EXITED
+			task.RuntimeConf.Message = extendedErr.Error()
+			p.startFailedStop(extendedErr)
+			return extendedErr
+		}
+
 		createInst, createErr := p.conClient.CreateContainer(name, task)
 		if createErr != nil {
 			logs.Errorf("CNIPod create %s with name %s failed, err: %s\n", task.Image, name, createErr.Error())
@@ -394,7 +444,7 @@ func (p *CNIPod) Start() error {
 		task.HostName = hostname
 
 		task.RuntimeConf.ID = createInst.ID
-		task.RuntimeConf.NodeAddress = util.GetIPAddress()[0]
+		task.RuntimeConf.NodeAddress = util.GetIPAddress()
 		task.RuntimeConf.IPAddress = p.cniIPAddr
 		task.RuntimeConf.Status = container.ContainerStatus_CREATED
 		task.RuntimeConf.Message = "container created"
@@ -549,26 +599,16 @@ func (p *CNIPod) runningFailedStop(err error) {
 			task.HealthCheck.Stop()
 		}
 		p.conClient.StopContainer(name, task.KillPolicy)
-		if task.AutoRemove {
+		/*if task.AutoRemove {
 			p.conClient.RemoveContainer(name, true)
-		}
+		}*/
 		task.RuntimeConf.Status = container.ContainerStatus_EXITED
-
-		if p.exitCode == 0 {
-			task.RuntimeConf.Message = fmt.Sprintf("container exit because other container finished in pod")
-		} else {
-			task.RuntimeConf.Message = fmt.Sprintf("container exit because other container exited in pod")
-		}
+		task.RuntimeConf.Message = fmt.Sprintf("container exit because other container exited in pod")
 
 		delete(p.runningContainer, name)
 	}
 
-	if p.exitCode == 0 {
-		p.status = container.PodStatus_FINISH
-	} else {
-		p.status = container.PodStatus_FAILED
-	}
-
+	p.status = container.PodStatus_FAILED
 	p.message = err.Error()
 	logs.Infoln("CNIPod runningFailed stop end.")
 }
@@ -580,15 +620,9 @@ func (p *CNIPod) containersWatch(cxt context.Context) {
 		logs.Errorf("CNIPod status Error, request %s, but got %s, CNIPod Container watch exit\n", container.PodStatus_STARTING, p.status)
 		return
 	}
-	defer func() {
-		if err := recover(); err != nil {
-			logs.Infof("CNIPod panic:\n\n%+v", err)
-			p.runningFailedStop(fmt.Errorf("Pod failed because panic"))
-			return
-		}
-	}()
 
 	tick := time.NewTicker(defaultPodWatchInterval * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-cxt.Done():
@@ -608,16 +642,18 @@ func (p *CNIPod) containerCheck() error {
 	healthyCount := 0
 	p.lock.Lock()
 	defer p.lock.Unlock()
+
 	tolerance := 0
 	for name := range p.runningContainer {
 		info, err := p.conClient.InspectContainer(name)
-		info.Healthy = true
 		if err != nil {
 			//inspect error
 			tolerance++
 			logs.Errorf("CNIPod Inspect info from container runtime Err: %s, #########wait for next tick, tolerance: %d#########\n", err.Error(), tolerance)
 			continue
 		}
+
+		info.Healthy = true
 		task := p.conTasks[name]
 		if task.RuntimeConf.Status != info.Status {
 			//status changed
@@ -633,7 +669,11 @@ func (p *CNIPod) containerCheck() error {
 				if task.HealthCheck != nil && !task.HealthCheck.IsStarting() {
 					//health check starting when Status become RUNNING
 					logs.Infof("container [%s] is running, healthy status unkown, starting HealthyChecker with ip: %s\n", task.RuntimeConf.Name, p.cniIPAddr)
-					task.HealthCheck.SetHost(p.cniIPAddr)
+					if task.HealthCheck.Name() == healthcheck.CommandHealthcheck {
+						task.HealthCheck.SetHost(task.RuntimeConf.ID)
+					} else {
+						task.HealthCheck.SetHost(p.cniIPAddr)
+					}
 					go task.HealthCheck.Start()
 				}
 				running++
@@ -651,12 +691,7 @@ func (p *CNIPod) containerCheck() error {
 				delete(p.runningContainer, name)
 
 				p.exitCode = task.RuntimeConf.ExitCode
-
-				if task.RuntimeConf.ExitCode == 0 {
-					task.RuntimeConf.Message = "container is finished"
-				} else {
-					task.RuntimeConf.Message = "container is down"
-				}
+				task.RuntimeConf.Message = "The container exits with an exception and you need to look at the business log location problem"
 
 				//stop running container
 				p.runningFailedStop(fmt.Errorf("Pod failed because %s", task.RuntimeConf.Message))
@@ -738,7 +773,8 @@ func (p *CNIPod) GetNetArgs() [][2]string {
 	return args
 }
 
-func (p *CNIPod) UpdateResources(id string, resource *schedTypes.Resource) error {
+// UpdateResources update resources of containers
+func (p *CNIPod) UpdateResources(id string, resource *schedTypes.TaskResources) error {
 	var exist bool
 	var conTask *container.BcsContainerTask
 
@@ -759,7 +795,8 @@ func (p *CNIPod) UpdateResources(id string, resource *schedTypes.Resource) error
 		return err
 	}
 
-	conTask.RuntimeConf.Resource = resource
+	conTask.RuntimeConf.Resource.Cpus = *resource.ReqCpu
+	conTask.RuntimeConf.Resource.Mem = *resource.ReqMem
 	return nil
 }
 

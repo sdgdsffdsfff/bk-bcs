@@ -16,7 +16,7 @@ package task
 import (
 	"testing"
 
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/types"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -28,7 +28,7 @@ func TestCreateScaleResource(t *testing.T) {
 }
 
 func TestBuildResource(t *testing.T) {
-	resources := BuildResources(&types.Resource{Cpus:0.1, Mem: 16, Disk: 10})
+	resources := BuildResources(&types.Resource{Cpus: 0.1, Mem: 16, Disk: 10})
 	assert.Equal(t, *resources[0].Name, "cpus")
 	assert.Equal(t, *resources[1].Name, "mem")
 	assert.Equal(t, *resources[2].Name, "disk")

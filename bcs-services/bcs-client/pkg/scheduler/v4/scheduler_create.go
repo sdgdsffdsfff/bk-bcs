@@ -42,9 +42,13 @@ func (bs *bcsScheduler) CreateDeployment(clusterID, namespace string, data []byt
 	return bs.createResource(clusterID, namespace, BcsSchedulerResourceDeployment, data)
 }
 
+func (bs *bcsScheduler) CreateDaemonset(clusterID, namespace string, data []byte) error {
+	return bs.createResource(clusterID, namespace, BcsSchedulerResourceDaemonset, data)
+}
+
 func (bs *bcsScheduler) createResource(clusterID, namespace, resourceType string, data []byte) error {
 	resp, err := bs.requester.Do(
-		fmt.Sprintf(BcsSchedulerResourceURI, bs.bcsApiAddress, namespace, resourceType, ""),
+		fmt.Sprintf(bcsSchedulerResourceURI, bs.bcsAPIAddress, namespace, resourceType, ""),
 		http.MethodPost,
 		data,
 		getClusterIDHeader(clusterID),

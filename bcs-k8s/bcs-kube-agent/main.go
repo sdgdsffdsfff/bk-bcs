@@ -17,10 +17,10 @@ import (
 	"fmt"
 	"os"
 
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-common/common/conf"
-	"bk-bcs/bcs-common/common/version"
-	"bk-bcs/bcs-k8s/bcs-kube-agent/app"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/common/conf"
+	"github.com/Tencent/bk-bcs/bcs-common/common/version"
+	"github.com/Tencent/bk-bcs/bcs-k8s/bcs-kube-agent/app"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -34,6 +34,13 @@ var (
 	bkeAddress         string
 	clusterId          string
 	insecureSkipVerify bool
+	// 外网跨云部署时，需要上报的api-server的公网或代理地址
+	ExternalProxyAddresses string
+	// 是否使用 websocket 进行注册
+	useWebsocket  bool
+	websocketPath string
+	reportPath    string
+	logConf       conf.LogConfig
 )
 
 var rootCmd = &cobra.Command{
@@ -46,10 +53,7 @@ var rootCmd = &cobra.Command{
 			os.Exit(0)
 		}
 
-		logConf := conf.LogConfig{
-			ToStdErr:        true,
-			StdErrThreshold: "0",
-		}
+		logConf.ToStdErr = true
 		blog.InitLogs(logConf)
 		defer blog.CloseLogs()
 
@@ -67,12 +71,30 @@ func init() {
 	cobra.OnInitialize(initConfig)
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file")
 	rootCmd.PersistentFlags().BoolVar(&versionFlag, "version", false, "display version info")
-	rootCmd.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
-	rootCmd.PersistentFlags().IntVar(&periodSync, "periodsync", 60, "How often to sync message to kube-server, default is 30 seconds")
-	rootCmd.PersistentFlags().StringVar(&listenAddr, "listen-addr", "0.0.0.0:10254", "The address on which the HTTP server will listen to")
-	rootCmd.PersistentFlags().StringVar(&bkeAddress, "bke-address", "", "the bke address")
-	rootCmd.PersistentFlags().StringVar(&clusterId, "cluster-id", "", "cluster which the agent run in")
-	rootCmd.PersistentFlags().BoolVar(&insecureSkipVerify, "insecureSkipVerify", false, "verifies the server's certificate chain and host name")
+	rootCmd.PersistentFlags().StringVar(
+		&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
+	rootCmd.PersistentFlags().IntVar(
+		&periodSync, "periodsync", 60, "How often to sync message to kube-server, default is 30 seconds")
+	rootCmd.PersistentFlags().StringVar(
+		&listenAddr, "listen-addr", "0.0.0.0:10254", "The address on which the HTTP server will listen to")
+	rootCmd.PersistentFlags().StringVar(
+		&bkeAddress, "bke-address", "", "the bke address")
+	rootCmd.PersistentFlags().StringVar(
+		&reportPath, "report-path", "/bcsapi/v4/clustermanager/v1/clusters/%s/credentials", "the bke report url")
+	rootCmd.PersistentFlags().StringVar(
+		&clusterId, "cluster-id", "", "cluster which the agent run in")
+	rootCmd.PersistentFlags().BoolVar(
+		&insecureSkipVerify, "insecureSkipVerify", false, "verifies the server's certificate chain and host name")
+	rootCmd.PersistentFlags().StringVar(
+		&ExternalProxyAddresses, "external-proxy-addresses",
+		"", "external proxy addresses of apiserver, separated by semicolon")
+	rootCmd.PersistentFlags().BoolVar(
+		&useWebsocket, "use-websocket", false, "whether use websocket to register to bcs-api")
+	rootCmd.PersistentFlags().StringVar(
+		&websocketPath, "websocket-path", "/bcsapi/v4/clustermanager/v1/websocket/connect",
+		"path of the bke address for kubeagent websocket tunnel to register")
+	rootCmd.PersistentFlags().Int32Var(&logConf.Verbosity, "verbosity", 3, "verbosity for log")
+
 	// these three flag support direct flag and viper config at the same time, the direct flag could cover the viper config.
 	viper.BindPFlag("agent.kubeconfig", rootCmd.PersistentFlags().Lookup("kubeconfig"))
 	viper.BindPFlag("agent.periodSync", rootCmd.PersistentFlags().Lookup("periodsync"))
@@ -80,6 +102,10 @@ func init() {
 	viper.BindPFlag("bke.serverAddress", rootCmd.PersistentFlags().Lookup("bke-address"))
 	viper.BindPFlag("cluster.id", rootCmd.PersistentFlags().Lookup("cluster-id"))
 	viper.BindPFlag("agent.insecureSkipVerify", rootCmd.PersistentFlags().Lookup("insecureSkipVerify"))
+	viper.BindPFlag("agent.external-proxy-addresses", rootCmd.PersistentFlags().Lookup("external-proxy-addresses"))
+	viper.BindPFlag("agent.use-websocket", rootCmd.PersistentFlags().Lookup("use-websocket"))
+	viper.BindPFlag("bke.websocket-path", rootCmd.PersistentFlags().Lookup("websocket-path"))
+	viper.BindPFlag("bke.report-path", rootCmd.PersistentFlags().Lookup("report-path"))
 }
 
 func initConfig() {

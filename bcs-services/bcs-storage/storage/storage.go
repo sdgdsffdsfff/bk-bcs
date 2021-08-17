@@ -14,26 +14,33 @@
 package bcsstorage
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/pprof"
+	"strconv"
+	"strings"
 
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-common/common/http/httpserver"
-	"bk-bcs/bcs-common/common/metric"
-	"bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-services/bcs-storage/app/options"
-	"bk-bcs/bcs-services/bcs-storage/storage/actions"
-	"bk-bcs/bcs-services/bcs-storage/storage/apiserver"
-	"bk-bcs/bcs-services/bcs-storage/storage/rdiscover"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/common/http/httpserver"
+	"github.com/Tencent/bk-bcs/bcs-common/common/version"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/registry"
+	trestful "github.com/Tencent/bk-bcs/bcs-common/pkg/tracing/restful"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/app/options"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/actions"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/actions/utils/metrics"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/actions/utils/middle"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/apiserver"
 
-	"github.com/emicklei/go-restful"
+	restful "github.com/emicklei/go-restful"
+	"github.com/opentracing/opentracing-go"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // StorageServer is a data struct of bcs storage server
 type StorageServer struct {
-	conf       *options.StorageOptions
-	httpServer *httpserver.HttpServer
-	rd         *rdiscover.RegDiscover
+	conf         *options.StorageOptions
+	httpServer   *httpserver.HttpServer
+	etcdRegistry registry.Registry
 }
 
 // NewStorageServer create storage server object
@@ -46,11 +53,31 @@ func NewStorageServer(op *options.StorageOptions) (*StorageServer, error) {
 	// Http server
 	s.httpServer = httpserver.NewHttpServer(s.conf.Port, s.conf.Address, "")
 	if s.conf.ServerCert.IsSSL {
-		s.httpServer.SetSsl(s.conf.ServerCert.CAFile, s.conf.ServerCert.CertFile, s.conf.ServerCert.KeyFile, s.conf.ServerCert.CertPwd)
+		s.httpServer.SetSsl(
+			s.conf.ServerCert.CAFile,
+			s.conf.ServerCert.CertFile,
+			s.conf.ServerCert.KeyFile,
+			s.conf.ServerCert.CertPwd)
 	}
 
 	// RDiscover
-	s.rd = rdiscover.NewRegDiscover(s.conf)
+	if s.conf.Etcd.Feature {
+		tlsCfg, err := s.conf.Etcd.GetTLSConfig()
+		if err != nil {
+			blog.Errorf("storage loading etcd registry tls config failed, %s", err.Error())
+			return nil, err
+		}
+		// init go-micro registry
+		eoption := &registry.Options{
+			Name:         "storage.bkbcs.tencent.com",
+			Version:      version.BcsVersion,
+			RegistryAddr: strings.Split(s.conf.Etcd.Address, ","),
+			RegAddr:      fmt.Sprintf("%s:%d", s.conf.Address, s.conf.Port),
+			Config:       tlsCfg,
+		}
+		blog.Infof("#############storage turn on etcd registry feature, options %+v ###############", eoption)
+		s.etcdRegistry = registry.NewEtcdRegistry(eoption)
+	}
 
 	// ApiResource
 	a := apiserver.GetAPIResource()
@@ -60,11 +87,31 @@ func NewStorageServer(op *options.StorageOptions) (*StorageServer, error) {
 	return s, nil
 }
 
+func (s *StorageServer) initFilterFunctions() []restful.FilterFunction {
+	filterFunctions := []restful.FilterFunction{}
+
+	// register middleware
+	mdlw := middle.New(middle.Options{
+		Recorder: metrics.NewRecorder(metrics.Config{
+			Prefix: middle.MetricsPrefix,
+		}),
+		GroupedStatus: true,
+	})
+
+	filterFunctions = append(filterFunctions, trestful.NewOTFilter(opentracing.GlobalTracer()))
+	filterFunctions = append(filterFunctions, middle.MetricsMiddleHandler(mdlw))
+
+	return filterFunctions
+}
+
 func (s *StorageServer) initHTTPServer() error {
 	a := apiserver.GetAPIResource()
 
+	// register middleware
+	filterFunctions := s.initFilterFunctions()
+
 	// Api v1
-	s.httpServer.RegisterWebServer(actions.PathV1, nil, a.ActionsV1)
+	s.httpServer.RegisterWebServer(actions.PathV1, filterFunctions, a.ActionsV1)
 
 	if a.Conf.DebugMode {
 		s.initDebug()
@@ -96,46 +143,34 @@ func (s *StorageServer) Start() error {
 		chErr <- err
 	}()
 
-	// register and discover
-	go func() {
-		err := s.rd.Start()
-		blog.Errorf("storage rdiscover start failed! err:%s", err.Error())
-		chErr <- err
-	}()
-
-	metricHandler(s.conf)
+	runPrometheusMetrics(s.conf)
 
 	// startDaemon
 	actions.StartActionDaemon()
 
+	// register and discover
+	if s.conf.Etcd.Feature {
+		if err := s.etcdRegistry.Register(); err != nil {
+			blog.Errorf("storage etcd registry failed, %s", err.Error())
+			chErr <- err
+		}
+	}
+
 	select {
 	case err := <-chErr:
 		blog.Errorf("exit! err:%s", err.Error())
+		if s.conf.Etcd.Feature {
+			s.etcdRegistry.Deregister()
+		}
 		return err
 	}
 }
 
-func metricHandler(op *options.StorageOptions) {
-	c := metric.Config{
-		ModuleName: types.BCS_MODULE_STORAGE,
-		MetricPort: op.MetricPort,
-		IP:         op.Address,
-		RunMode:    metric.Master_Master_Mode,
-
-		SvrCaFile:   op.ServerCert.CAFile,
-		SvrCertFile: op.ServerCert.CertFile,
-		SvrKeyFile:  op.ServerCert.KeyFile,
-		SvrKeyPwd:   op.ServerCert.CertPwd,
-	}
-
-	if err := metric.NewMetricController(
-		c,
-		apiserver.GetHealth,
-	); err != nil {
-		blog.Errorf("metric server error: %v", err)
-		return
-	}
-	blog.Infof("start metric server successfully")
+//runPrometheusMetrics starting prometheus metrics handler
+func runPrometheusMetrics(op *options.StorageOptions) {
+	http.Handle("/metrics", promhttp.Handler())
+	addr := op.Address + ":" + strconv.Itoa(int(op.MetricPort))
+	go http.ListenAndServe(addr, nil)
 }
 
 func getRouteFunc(f http.HandlerFunc) restful.RouteFunction {

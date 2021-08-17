@@ -14,8 +14,8 @@
 package backend
 
 import (
-	commtypes "bk-bcs/bcs-common/common/types"
 	"fmt"
+	commtypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
 )
 
 //custom resource register
@@ -86,6 +86,10 @@ func (b *backend) DeleteCustomResource(kind, ns, name string) error {
 
 func (b *backend) ListCustomResourceDefinition(kind, ns string) ([]*commtypes.Crd, error) {
 	return b.store.ListCustomResourceDefinition(kind, ns)
+}
+
+func (b *backend) ListAllCrds(kind string) ([]*commtypes.Crd, error) {
+	return b.store.ListAllCrds(kind)
 }
 
 func (b *backend) FetchCustomResourceDefinition(kind, ns, name string) (*commtypes.Crd, error) {

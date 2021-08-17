@@ -16,10 +16,11 @@ package list
 import (
 	"fmt"
 	"net/url"
+	"sort"
 
-	commonTypes "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-services/bcs-client/cmd/utils"
-	"bk-bcs/bcs-services/bcs-client/pkg/storage/v1"
+	commonTypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/utils"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/pkg/storage/v1"
 )
 
 func listApplication(c *utils.ClientContext) error {
@@ -27,15 +28,25 @@ func listApplication(c *utils.ClientContext) error {
 		return err
 	}
 
-	condition := url.Values{}
-	condition.Add("namespace", c.Namespace())
-
 	storage := v1.NewBcsStorage(utils.GetClientOption())
+
+	// get namespace
+	condition := url.Values{}
+	condition.Add(filterNamespaceTag, c.Namespace())
+
+	if c.IsAllNamespace() {
+		var err error
+		if condition, err = getNamespaceFilter(storage, c.ClusterID()); err != nil {
+			return err
+		}
+	}
+
 	list, err := storage.ListApplication(c.ClusterID(), condition)
 	if err != nil {
 		return fmt.Errorf("failed to list application: %v", err)
 	}
 
+	sort.Sort(list)
 	return printListApplication(list)
 }
 

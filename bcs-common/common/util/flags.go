@@ -14,12 +14,11 @@
 package util
 
 import (
-	"bk-bcs/bcs-common/common/version"
 	goflag "flag"
+	"os"
 	"strings"
 
-	//"github.com/golang/glog"
-	"os"
+	"github.com/Tencent/bk-bcs/bcs-common/common/version"
 
 	"github.com/spf13/pflag"
 )
@@ -45,7 +44,7 @@ func WarnWordSepNormalizeFunc(f *pflag.FlagSet, name string) pflag.NormalizedNam
 
 // AddCommonFlags add common flags that is needed by all modules
 func AddCommonFlags(cmdline *pflag.FlagSet) *bool {
-	version := cmdline.Bool("version", false, "show version infomation")
+	version := cmdline.Bool("version", false, "show version information")
 	return version
 }
 

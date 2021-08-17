@@ -14,46 +14,51 @@
 package mesosdriver
 
 import (
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-common/common/http/httpserver"
-	"bk-bcs/bcs-mesos/bcs-mesos-driver/mesosdriver/backend"
-	"bk-bcs/bcs-mesos/bcs-mesos-driver/mesosdriver/backend/v4http"
-	"bk-bcs/bcs-mesos/bcs-mesos-driver/mesosdriver/config"
-	"bk-bcs/bcs-mesos/bcs-mesos-driver/mesosdriver/filter"
-	"strings"
-	rd "bk-bcs/bcs-common/common/RegisterDiscover"
-	commhttp "bk-bcs/bcs-common/common/http"
-	commtype "bk-bcs/bcs-common/common/types"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
-	"bk-bcs/bcs-common/common/version"
-	"fmt"
-	"bk-bcs/bcs-common/common/metric"
-	"github.com/emicklei/go-restful"
+
+	rd "github.com/Tencent/bk-bcs/bcs-common/common/RegisterDiscover"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	commhttp "github.com/Tencent/bk-bcs/bcs-common/common/http"
+	"github.com/Tencent/bk-bcs/bcs-common/common/http/httpserver"
+	"github.com/Tencent/bk-bcs/bcs-common/common/metric"
+	commtype "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/common/version"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/registry"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-driver/mesosdriver/backend"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-driver/mesosdriver/backend/v4http"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-driver/mesosdriver/config"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-driver/mesosdriver/filter"
+
+	restful "github.com/emicklei/go-restful"
 )
 
 //MesosDriver is data struct of mesos driver
 type MesosDriver struct {
 	config        *config.MesosDriverConfig
+	etcdRegistry  registry.Registry
 	httpServ      *httpserver.HttpServer
 	v4Scheduler   backend.Scheduler
 	CurrScheduler string
-	bcsClusterId  string
+	bcsClusterID  string
 
 	inited bool
 }
 
+// IsHealthy healthy interface for bcs-health(deprecated)
 func (m *MesosDriver) IsHealthy() (bool, string) {
 
 	if !m.inited {
 		return false, "in starting"
 	}
 
-	if m.bcsClusterId == "" {
+	if m.bcsClusterID == "" {
 		return false, "fail to get clusterid"
 	}
 
@@ -64,6 +69,8 @@ func (m *MesosDriver) IsHealthy() (bool, string) {
 	return true, "run ok"
 }
 
+// RunMetric run metric feaature
+//deprecated, change to promethus collector
 func (m *MesosDriver) RunMetric() {
 
 	conf := metric.Config{
@@ -71,7 +78,7 @@ func (m *MesosDriver) RunMetric() {
 		ModuleName:  commtype.BCS_MODULE_MESOSDRIVER,
 		MetricPort:  m.config.MetricPort,
 		IP:          m.config.Address,
-		ClusterID:   m.bcsClusterId,
+		ClusterID:   m.bcsClusterID,
 		SvrCaFile:   m.config.ServCert.CAFile,
 		SvrCertFile: m.config.ServCert.CertFile,
 		SvrKeyFile:  m.config.ServCert.KeyFile,
@@ -96,7 +103,11 @@ func (m *MesosDriver) RunMetric() {
 	blog.Infof("run metric ok")
 }
 
+// NewMesosDriverServer create mesosdriver according config
 func NewMesosDriverServer(conf *config.MesosDriverConfig) (*MesosDriver, error) {
+
+	blog.Infof("mesos-driver loading configuration: %+v", conf)
+
 	m := &MesosDriver{}
 
 	//config
@@ -114,40 +125,66 @@ func NewMesosDriverServer(conf *config.MesosDriverConfig) (*MesosDriver, error) 
 	m.v4Scheduler = v4http.NewScheduler()
 	m.v4Scheduler.InitConfig(m.config)
 
-	m.bcsClusterId = conf.Cluster
+	m.bcsClusterID = conf.Cluster
 	m.inited = true
 
 	return m, nil
 }
 
+// Stop driver stop
 func (m *MesosDriver) Stop() error {
 	return nil
 }
 
+// Start start mesosdriver
 func (m *MesosDriver) Start() error {
 
-	blog.Info("mesos driver %s run for cluster %s", m.config.Address, m.bcsClusterId)
+	blog.Info("mesos driver %s run for cluster %s", m.config.Address, m.bcsClusterID)
 
 	m.RunMetric()
 
 	go m.DiscvScheduler()
-	go m.RegDiscover()
+
+	if m.config.RegisterWithWebsocket {
+		err := m.buildWebsocketToAPI()
+		if err != nil {
+			blog.Fatalf("err when register with websocket: %s", err.Error())
+			os.Exit(1)
+		}
+	} else {
+		go m.RegDiscover()
+		if err := m.etcdRegistryFeature(); err != nil {
+			os.Exit(1)
+		}
+		defer m.etcdRegistryClean()
+	}
+
+	go m.registerMesosZkEndpoints()
 
 	chErr := make(chan error, 1)
 
 	generalFilter := filter.NewFilter()
 	//admission webhook filter
 	if m.config.AdmissionWebhook {
-		zkServers := strings.Split(m.config.SchedDiscvSvr, ",")
-		generalFilter.AppendFilter(filter.NewAdmissionWebhookFilter(m.v4Scheduler, zkServers))
+		admissionFilter, err := filter.NewAdmissionWebhookFilter(m.v4Scheduler, m.config.KubeConfig)
+		if err != nil {
+			blog.Errorf(err.Error())
+			os.Exit(1)
+		}
+		generalFilter.AppendFilter(admissionFilter)
 		blog.Infof("mesosdriver add admission webhook filter")
 	}
 	//check http head valid filter
 	generalFilter.AppendFilter(filter.NewHeaderValidFilter(m.config))
 	blog.Infof("mesosdriver add header valid filter")
+
+	// register filter middleware
+	filters := []restful.FilterFunction{}
+	filters = append(filters, generalFilter.Filter)
+
 	//register actions
 	blog.Info("mesos driver begin register v4 api")
-	m.httpServ.RegisterWebServer("/mesosdriver/v4", generalFilter.Filter, m.v4Scheduler.Actions())
+	m.httpServ.RegisterWebServer("/mesosdriver/v4", filters, m.v4Scheduler.Actions())
 
 	go func() {
 		err := m.httpServ.ListenAndServe()
@@ -162,12 +199,13 @@ func (m *MesosDriver) Start() error {
 	}
 }
 
+// Filter filte request not belong to local cluster
 func (m *MesosDriver) Filter(req *restful.Request, resp *restful.Response, filterChain *restful.FilterChain) {
-	clusterId := req.Request.Header.Get("BCS-ClusterID")
-	if clusterId != m.bcsClusterId {
-		msg := fmt.Sprintf("ClusterId %s is invalid", clusterId)
+	clusterID := req.Request.Header.Get("BCS-ClusterID")
+	if clusterID != m.bcsClusterID {
+		msg := fmt.Sprintf("ClusterId %s is invalid", clusterID)
 		blog.Error(msg)
-		resp.WriteHeaderAndEntity(http.StatusBadRequest, commhttp.APIRespone{false, 1, msg, nil})
+		resp.WriteHeaderAndEntity(http.StatusBadRequest, commhttp.APIRespone{Result: false, Code: 1, Message: msg, Data: nil})
 		return
 	}
 
@@ -175,6 +213,43 @@ func (m *MesosDriver) Filter(req *restful.Request, resp *restful.Response, filte
 
 }
 
+func (m *MesosDriver) etcdRegistryFeature() error {
+	if m.config.Etcd.Feature {
+		blog.Infof("etcd registry information: %+v", m.config.Etcd)
+		tlsCfg, err := m.config.Etcd.GetTLSConfig()
+		if err != nil {
+			blog.Errorf("turn on etcd registry feature but configuration not correct, %s", err.Error())
+			return err
+		}
+		clusterID := strings.Split(m.config.Cluster, "-")
+		if len(clusterID) != 3 {
+			blog.Errorf("clusterID in configuration is not formation expected! expect: BCS-MESOS-XXXXX, actual: %s", m.config.Cluster)
+			return fmt.Errorf("error clusterID formation")
+		}
+		// init go-micro registry
+		eoption := &registry.Options{
+			Name:         clusterID[2] + "." + "mesosdriver.bkbcs.tencent.com",
+			Version:      version.BcsVersion,
+			RegistryAddr: strings.Split(m.config.Etcd.Address, ","),
+			RegAddr:      fmt.Sprintf("%s:%d", m.config.Address, m.config.Port),
+			Config:       tlsCfg,
+		}
+		m.etcdRegistry = registry.NewEtcdRegistry(eoption)
+		if err := m.etcdRegistry.Register(); err != nil {
+			blog.Errorf("etcd registry feature turn on but register failed, %s", err.Error())
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *MesosDriver) etcdRegistryClean() {
+	if m.config.Etcd.Feature {
+		m.etcdRegistry.Deregister()
+	}
+}
+
+// RegDiscover register local service information
 func (m *MesosDriver) RegDiscover() {
 
 	blog.Info("driver to do register ...")
@@ -193,9 +268,8 @@ func (m *MesosDriver) RegDiscover() {
 		time.Sleep(3 * time.Second)
 		go m.RegDiscover()
 		return
-	} 
+	}
 	blog.Info("NewRegDiscover(%s) succ", m.config.RegDiscvSvr)
-	
 
 	err := regDiscv.Start()
 	if err != nil {
@@ -205,7 +279,7 @@ func (m *MesosDriver) RegDiscover() {
 		return
 	}
 	blog.Info("RegDiscover start succ")
-	
+
 	defer regDiscv.Stop()
 
 	host, err := os.Hostname()
@@ -217,6 +291,8 @@ func (m *MesosDriver) RegDiscover() {
 	regInfo.ServerInfo.Cluster = m.config.Cluster
 	regInfo.ServerInfo.IP = m.config.Address
 	regInfo.ServerInfo.Port = m.config.Port
+	regInfo.ServerInfo.ExternalIp = m.config.ExternalIp
+	regInfo.ServerInfo.ExternalPort = m.config.ExternalPort
 	regInfo.ServerInfo.MetricPort = m.config.MetricPort
 	regInfo.ServerInfo.HostName = host
 	regInfo.ServerInfo.Scheme = "http"
@@ -231,16 +307,16 @@ func (m *MesosDriver) RegDiscover() {
 	if err != nil {
 		blog.Error("json Marshal error(%s)", err.Error())
 		return
-	} 
+	}
 	err = regDiscv.RegisterService(key, []byte(data))
 	if err != nil {
 		blog.Error("RegisterService(%s) error(%s), redo after 3 second ...", key, err.Error())
 		time.Sleep(3 * time.Second)
 		go m.RegDiscover()
 		return
-	} 
+	}
 	blog.Info("RegisterService(%s:%s) succ", key, data)
-	
+
 	discvPath := commtype.BCS_SERV_BASEPATH + "/" + commtype.BCS_MODULE_MESOSDRIVER + "/" + regInfo.Cluster
 	discvEvent, err := regDiscv.DiscoverService(discvPath)
 	if err != nil {
@@ -252,6 +328,7 @@ func (m *MesosDriver) RegDiscover() {
 	blog.Info("DiscoverService(%s) succ", discvPath)
 
 	tick := time.NewTicker(180 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-tick.C:
@@ -286,6 +363,7 @@ func (m *MesosDriver) RegDiscover() {
 	} // end for
 }
 
+// DiscvScheduler discovery scheduler master
 func (m *MesosDriver) DiscvScheduler() {
 	blog.Infof("begin to discover scheduler from (%s), curr goroutine num(%d)", m.config.SchedDiscvSvr, runtime.NumGoroutine())
 	MesosDiscv := m.config.SchedDiscvSvr
@@ -320,6 +398,7 @@ func (m *MesosDriver) DiscvScheduler() {
 	blog.Infof("watch scheduler under (%s: %s), current goroutine num(%d)", MesosDiscv, discvPath, runtime.NumGoroutine())
 
 	tick := time.NewTicker(180 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-tick.C:
@@ -352,4 +431,99 @@ func (m *MesosDriver) DiscvScheduler() {
 			}
 		} // select
 	} // for
+}
+
+func (m *MesosDriver) registerMesosZkEndpoints() {
+	blog.Info("registerMesosZkEndpoints driver to do register ...")
+	// register service
+	regDiscv := rd.NewRegDiscoverEx(m.config.SchedDiscvSvr, time.Second*10)
+	if regDiscv == nil {
+		blog.Error("registerMesosZkEndpoints(%s) return nil, redo after 3 second ...", m.config.SchedDiscvSvr)
+		time.Sleep(3 * time.Second)
+		go m.registerMesosZkEndpoints()
+		return
+	}
+	blog.Info("registerMesosZkEndpoints(%s) succ", m.config.SchedDiscvSvr)
+
+	err := regDiscv.Start()
+	if err != nil {
+		blog.Error("registerMesosZkEndpoints regDiscv start error(%s), redo after 3 second ...", err.Error())
+		time.Sleep(3 * time.Second)
+		go m.registerMesosZkEndpoints()
+		return
+	}
+	blog.Info("registerMesosZkEndpoints start succ")
+	defer regDiscv.Stop()
+
+	host, err := os.Hostname()
+	if err != nil {
+		blog.Error("registerMesosZkEndpoints mesos driver get hostname err: %s", err.Error())
+		host = "UNKOWN"
+	}
+	var regInfo commtype.MesosDriverServInfo
+	regInfo.ServerInfo.Cluster = m.config.Cluster
+	regInfo.ServerInfo.IP = m.config.Address
+	regInfo.ServerInfo.Port = m.config.Port
+	regInfo.ServerInfo.MetricPort = m.config.MetricPort
+	regInfo.ServerInfo.HostName = host
+	regInfo.ServerInfo.Scheme = "http"
+	regInfo.ServerInfo.Pid = os.Getpid()
+	regInfo.ServerInfo.Version = version.GetVersion()
+	if m.config.ServCert.IsSSL {
+		regInfo.ServerInfo.Scheme = "https"
+	}
+
+	key := commtype.BCS_SERV_BASEPATH + "/" + commtype.BCS_MODULE_MESOSDRIVER + "/" + m.config.Address
+	data, err := json.Marshal(regInfo)
+	if err != nil {
+		blog.Error("registerMesosZkEndpoints json Marshal error(%s)", err.Error())
+		return
+	}
+	err = regDiscv.RegisterService(key, []byte(data))
+	if err != nil {
+		blog.Error("registerMesosZkEndpoints(%s) error(%s), redo after 3 second ...", key, err.Error())
+		time.Sleep(3 * time.Second)
+		go m.registerMesosZkEndpoints()
+		return
+	}
+	blog.Info("registerMesosZkEndpoints(%s:%s) succ", key, data)
+
+	discvPath := commtype.BCS_SERV_BASEPATH + "/" + commtype.BCS_MODULE_MESOSDRIVER
+	discvEvent, err := regDiscv.DiscoverService(discvPath)
+	if err != nil {
+		blog.Error("registerMesosZkEndpoints(%s) error(%s), redo after 3 second ...", discvPath, err.Error())
+		time.Sleep(3 * time.Second)
+		go m.registerMesosZkEndpoints()
+		return
+	}
+	blog.Info("registerMesosZkEndpoints(%s) succ", discvPath)
+
+	for {
+		select {
+		case event := <-discvEvent:
+			blog.Info("registerMesosZkEndpoints get discover event")
+			if event.Err != nil {
+				blog.Error("registerMesosZkEndpoints get discover event err:%s,  redo after 3 second ...", event.Err.Error())
+				time.Sleep(3 * time.Second)
+				go m.registerMesosZkEndpoints()
+				return
+			}
+
+			isRegstered := false
+			for i, server := range event.Server {
+				blog.Info("registerMesosZkEndpoints discovered : server[%d]: %s %s", i, event.Key, server)
+				if server == string(data) {
+					blog.Info("registerMesosZkEndpoints discovered : server[%d] is myself", i)
+					isRegstered = true
+				}
+			}
+
+			if isRegstered == false {
+				blog.Warn("registerMesosZkEndpoints drive is not regestered in zk, do register after 3 second ...")
+				time.Sleep(3 * time.Second)
+				go m.registerMesosZkEndpoints()
+				return
+			}
+		} // end select
+	} // end for
 }

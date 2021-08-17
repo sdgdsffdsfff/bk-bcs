@@ -14,7 +14,7 @@
 package agent
 
 import (
-	"bk-bcs/bcs-services/bcs-client/cmd/utils"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/utils"
 	"github.com/urfave/cli"
 )
 
@@ -62,6 +62,10 @@ func NewAgentSettingCommand() cli.Command {
 			cli.StringFlag{
 				Name:  "ip",
 				Usage: "The ip of slaves. In list/update it support multi ips, split by comma",
+			},
+			cli.StringFlag{
+				Name:  "labelSelector",
+				Usage: "string selector selector of slaves. example: key1=value1,key2=value2",
 			},
 		},
 		Action: func(c *cli.Context) error {

@@ -14,14 +14,18 @@
 package v4
 
 import (
+	"context"
 	"net/url"
 
-	commonTypes "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/mesosproto/mesos"
-	"bk-bcs/bcs-services/bcs-client/pkg/types"
-	"bk-bcs/bcs-services/bcs-client/pkg/utils"
+	commonTypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	schetypes "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/pkg/types"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/pkg/utils"
+
+	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 )
 
+//Scheduler mesos scheduler interface for bcs-api
 type Scheduler interface {
 	CreateApplication(clusterID, namespace string, data []byte) error
 	CreateProcess(clusterID, namespace string, data []byte) error
@@ -29,6 +33,7 @@ type Scheduler interface {
 	CreateSecret(clusterID, namespace string, data []byte) error
 	CreateService(clusterID, namespace string, data []byte) error
 	CreateDeployment(clusterID, namespace string, data []byte) error
+	CreateDaemonset(clusterID, namespace string, data []byte) error
 
 	UpdateApplication(clusterID, namespace string, data []byte, extraValue url.Values) error
 	UpdateProcess(clusterID, namespace string, data []byte, extraValue url.Values) error
@@ -43,6 +48,7 @@ type Scheduler interface {
 	DeleteSecret(clusterID, namespace, name string, enforce bool) error
 	DeleteService(clusterID, namespace, name string, enforce bool) error
 	DeleteDeployment(clusterID, namespace, name string, enforce bool) error
+	DeleteDaemonset(clusterID, namespace, name string, enforce bool) error
 
 	ScaleApplication(clusterID, namespace, name string, instance int) error
 	ScaleProcess(clusterID, namespace, name string, instance int) error
@@ -69,38 +75,80 @@ type Scheduler interface {
 	GetApplicationDefinition(clusterID, namespace, name string) (*commonTypes.ReplicaController, error)
 	GetProcessDefinition(clusterID, namespace, name string) (*commonTypes.ReplicaController, error)
 	GetDeploymentDefinition(clusterID, namespace, name string) (*commonTypes.BcsDeployment, error)
+	//GetOffer get specified mesos cluster resources list by agents
+	GetOffer(clusterID string) ([]*schetypes.OfferWithDelta, error)
 
-	GetOffer(clusterID string) ([]*mesos.Offer, error)
+	/*
+		CustomResourceDefinition section
+	*/
+	//CreateResourceDefinition create CRD by definition file
+	CreateCustomResourceDefinition(clusterID string, data []byte) error
+	//UpdateResourceDefinition replace specified CRD
+	UpdateCustomResourceDefinition(clusterID, name string, data []byte) error
+	//ListCustomResourceDefinition list all created CRD
+	ListCustomResourceDefinition(clusterID string) (*v1beta1.CustomResourceDefinitionList, error)
+	//GetCustomResourceDefinition get specified CRD
+	GetCustomResourceDefinition(clusterID string, name string) (*v1beta1.CustomResourceDefinition, error)
+	//DeleteCustomResourceDefinition delete specified CRD
+	DeleteCustomResourceDefinition(clusterID, name string) error
+	/*
+		CustomResource section, depend on ListCustomResourceDefinition for validation
+	*/
+	//CreateResource create CRD by definition file
+	CreateCustomResource(clusterID, apiVersion, plural, namespace string, data []byte) error
+	//UpdateResource replace specified CRD
+	UpdateCustomResource(clusterID, apiVersion, plural, namespace, name string, data []byte) error
+	//ListCustomResource list all created CRD
+	ListCustomResource(clusterID, apiVersion, plural, namespace string) ([]byte, error)
+	//GetCustomResource get specified CRD
+	GetCustomResource(clusterID, apiVersion, plural, namespace, name string) ([]byte, error)
+	//DeleteCustomResource delete specified CRD
+	DeleteCustomResource(clusterID, apiVersion, plural, namespace, name string) error
+
+	CreateContainerExec(clusterId, containerId, hostIp string, command []string) (string, error)
+	StartContainerExec(ctx context.Context, clusterId, execId, containerId, hostIp string) (types.HijackedResponse, error)
+	ResizeContainerExec(clusterId, execId, hostIp string, height, width int) error
+
+	ListTransaction(clusterID, objKind, objNs, objName string) ([]*schetypes.Transaction, error)
+	DeleteTransaction(clusterID, ns, name string) error
 }
 
 const (
-	BcsSchedulerResourceURI           = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/%s?%s"
-	BcsSchedulerDeleteResourceURI     = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/%s/%s?enforce=%d"
-	BcsSchedulerScaleResourceURI      = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/%s/%s/scale/%d"
-	BcsSchedulerRollBackResourceURI   = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/%s/rollback"
-	BcsSchedulerResumeDeploymentURI   = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/deployments/%s/resumeupdate"
-	BcsSchedulerCancelDeploymentURI   = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/deployments/%s/cancelupdate"
-	BcsSchedulerPauseDeploymentURI    = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/deployments/%s/pauseupdate"
-	BcsSchedulerClusterResourceURI    = "%s/bcsapi/v4/scheduler/mesos/cluster/resources"
-	BcsSchedulerAgentSettingURI       = "%s/bcsapi/v4/scheduler/mesos/agentsettings/?ips=%s"
-	BcsSchedulerUpdateAgentSettingURI = "%s/bcsapi/v4/scheduler/mesos/agentsettings/update"
-	BcsSchedulerSetAgentSettingURI    = "%s/bcsapi/v4/scheduler/mesos/agentsettings"
-	BcsSchedulerEnableAgentURI        = "%s/bcsapi/v4/scheduler/mesos/agentsettings/enable?ips=%s"
-	BcsSchedulerDisableAgentURI       = "%s/bcsapi/v4/scheduler/mesos/agentsettings/disable?ips=%s"
-	BcsSchedulerRescheduleURI         = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/applications/%s/taskgroups/%s/rescheduler"
-	BcsSchedulerOfferURI              = "%s/bcsapi/v4/scheduler/mesos/cluster/current/offers"
-	BcsSchedulerAppDefinitionURI      = "%s/bcsapi/v4/scheduler/mesos/definition/application/%s/%s"
-	BcsSchedulerDeployDefinitionURI   = "%s/bcsapi/v4/scheduler/mesos/definition/deployment/%s/%s"
+	bcsSchedulerResourceURI                 = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/%s?%s"
+	bcsSchedulerDeleteResourceURI           = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/%s/%s?enforce=%d"
+	bcsSchedulerScaleResourceURI            = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/%s/%s/scale/%d"
+	bcsSchedulerRollBackResourceURI         = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/%s/rollback"
+	bcsSchedulerResumeDeploymentURI         = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/deployments/%s/resumeupdate"
+	bcsSchedulerCancelDeploymentURI         = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/deployments/%s/cancelupdate"
+	bcsSchedulerPauseDeploymentURI          = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/deployments/%s/pauseupdate"
+	bcsSchedulerClusterResourceURI          = "%s/bcsapi/v4/scheduler/mesos/cluster/resources"
+	bcsSchedulerAgentSettingURI             = "%s/bcsapi/v4/scheduler/mesos/agentsettings/?ips=%s"
+	bcsSchedulerUpdateAgentSettingURI       = "%s/bcsapi/v4/scheduler/mesos/agentsettings/update"
+	bcsSchedulerSetAgentSettingURI          = "%s/bcsapi/v4/scheduler/mesos/agentsettings"
+	bcsSchedulerEnableAgentURI              = "%s/bcsapi/v4/scheduler/mesos/agentsettings/enable?ips=%s"
+	bcsSchedulerDisableAgentURI             = "%s/bcsapi/v4/scheduler/mesos/agentsettings/disable?ips=%s"
+	bcsSchedulerRescheduleURI               = "%s/bcsapi/v4/scheduler/mesos/namespaces/%s/applications/%s/taskgroups/%s/rescheduler"
+	bcsSchedulerOfferURI                    = "%s/bcsapi/v4/scheduler/mesos/cluster/current/offers"
+	bcsSchedulerAppDefinitionURI            = "%s/bcsapi/v4/scheduler/mesos/definition/application/%s/%s"
+	bcsSchedulerDeployDefinitionURI         = "%s/bcsapi/v4/scheduler/mesos/definition/deployment/%s/%s"
+	bcsSchedulerCustomResourceURL           = "%s/bcsapi/v4/scheduler/mesos/customresources"
+	bcsScheudlerCustomResourceDefinitionURL = "%s/bcsapi/v4/scheduler/mesos/customresourcedefinitions"
+	bcsSchedulerCreateExecUri               = "%s/bcsapi/v4/scheduler/mesos/webconsole/create_exec?host_ip=%s"
+	bcsSchedulerStartExecUri                = "%s/bcsapi/v4/scheduler/mesos/webconsole/start_exec?host_ip=%s&container_id=%s&exec_id=%s"
+	bcsSchedulerResizeExecUri               = "%s/bcsapi/v4/scheduler/mesos/webconsole/resize_exec?host_ip=%s"
+	bcsSchedulerTransactionListUri          = "%s/bcsapi/v4/scheduler/mesos/transactions/%s?objKind=%s&objName=%s"
+	bcsSchedulerTransactionDeleteUri        = "%s/bcsapi/v4/scheduler/mesos/transactions/%s/%s"
 )
 
 type bcsScheduler struct {
-	bcsApiAddress string
+	bcsAPIAddress string
 	requester     utils.ApiRequester
 }
 
+//NewBcsScheduler create mesos scheduler api implemenation
 func NewBcsScheduler(options types.ClientOptions) Scheduler {
 	return &bcsScheduler{
-		bcsApiAddress: options.BcsApiAddress,
+		bcsAPIAddress: options.BcsApiAddress,
 		requester:     utils.NewApiRequester(options.ClientSSL, options.BcsToken),
 	}
 }

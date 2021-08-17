@@ -14,17 +14,17 @@
 package main
 
 import (
-	"bk-bcs/bcs-common/common"
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-common/common/blog/glog"
-	"bk-bcs/bcs-common/common/license"
-	"bk-bcs/bcs-common/common/metric"
-	commtype "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-services/bcs-api/config"
-	"bk-bcs/bcs-services/bcs-api/options"
-	"bk-bcs/bcs-services/bcs-api/processor"
-	"bk-bcs/bcs-services/bcs-api/regdiscv"
 	"fmt"
+	"github.com/Tencent/bk-bcs/bcs-common/common"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog/glog"
+	common_metric "github.com/Tencent/bk-bcs/bcs-common/common/metric"
+	commtype "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-api/config"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-api/metric"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-api/options"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-api/processor"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-api/regdiscv"
 	"log"
 	"os"
 	"runtime"
@@ -59,7 +59,6 @@ func main() {
 	defer blog.CloseLogs()
 
 	blog.Info("init config success")
-	license.CheckLicense(op.LicenseServerConfig)
 
 	//run apiserver
 	run(op)
@@ -89,7 +88,7 @@ func run(op *options.ServerOption) {
 		blog.Error("fail to save pid: err:%s", err.Error())
 	}
 
-	runMetric(conf, nil)
+	metric.RunMetric(conf, nil)
 
 	return
 }
@@ -106,6 +105,7 @@ func parseConfig(op *options.ServerOption) *config.ApiServConfig {
 	apiServConfig.MetricPort = op.MetricPort
 	apiServConfig.BKIamAuth = op.BKIamAuth
 	apiServConfig.BKE = op.BKE
+	apiServConfig.TKE = op.TKE
 	apiServConfig.Edition = op.Edition
 	apiServConfig.MesosWebconsoleProxyPort = op.MesosWebconsoleProxyPort
 	config.Edition = apiServConfig.Edition
@@ -113,6 +113,8 @@ func parseConfig(op *options.ServerOption) *config.ApiServConfig {
 	config.TurnOnRBAC = apiServConfig.BKE.TurnOnRBAC
 	config.ClusterCredentialsFixtures = apiServConfig.BKE.ClusterCredentialsFixtures
 	config.MesosWebconsoleProxyPort = apiServConfig.MesosWebconsoleProxyPort
+	config.TkeConf = op.TKE
+	apiServConfig.PeerToken = op.PeerToken
 
 	//server cert directory
 	if op.CertConfig.ServerCertFile != "" && op.CertConfig.ServerKeyFile != "" {
@@ -155,8 +157,8 @@ func runMetric(conf *config.ApiServConfig, err error) {
 
 	blog.Infof("run metric: port(%d)", conf.MetricPort)
 
-	metricConf := metric.Config{
-		RunMode:     metric.Master_Master_Mode,
+	metricConf := common_metric.Config{
+		RunMode:     common_metric.Master_Master_Mode,
 		ModuleName:  commtype.BCS_MODULE_APISERVER,
 		MetricPort:  conf.MetricPort,
 		IP:          conf.LocalIp,
@@ -166,7 +168,7 @@ func runMetric(conf *config.ApiServConfig, err error) {
 		SvrKeyPwd:   conf.ServCert.CertPasswd,
 	}
 
-	healthFunc := func() metric.HealthMeta {
+	healthFunc := func() common_metric.HealthMeta {
 		var isHealthy bool
 		var msg string
 		if err == nil {
@@ -175,14 +177,14 @@ func runMetric(conf *config.ApiServConfig, err error) {
 			msg = err.Error()
 		}
 
-		return metric.HealthMeta{
-			CurrentRole: metric.MasterRole,
+		return common_metric.HealthMeta{
+			CurrentRole: common_metric.MasterRole,
 			IsHealthy:   isHealthy,
 			Message:     msg,
 		}
 	}
 
-	if err := metric.NewMetricController(
+	if err := common_metric.NewMetricController(
 		metricConf,
 		healthFunc); nil != err {
 		blog.Errorf("run metric fail: %s", err.Error())

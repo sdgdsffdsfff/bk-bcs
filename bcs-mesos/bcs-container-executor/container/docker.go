@@ -15,22 +15,20 @@ package container
 
 import (
 	"archive/tar"
-	"bk-bcs/bcs-mesos/bcs-container-executor/util"
 	"bytes"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 
-	commtypes "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-mesos/bcs-container-executor/logs"
-	schedTypes "bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 	"encoding/json"
 	"time"
+
+	commtypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	schedTypes "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/logs"
 
 	dockerclient "github.com/fsouza/go-dockerclient"
 )
@@ -57,8 +55,10 @@ import (
 // }
 
 const (
+	// StopContainerGraceTime executor default gracetime
 	StopContainerGraceTime = 10
-	DefaultDockerCpuPeriod = 100000
+	// DefaultDockerCPUPeriod default cpu period for executor
+	DefaultDockerCPUPeriod = 100000
 )
 
 //DockerContainer implement container interface
@@ -118,6 +118,7 @@ func (docker *DockerContainer) RunCommand(containerID string, command []string) 
 	return nil
 }
 
+// RunCommandV2 v2 version run command
 func (docker *DockerContainer) RunCommandV2(ops *schedTypes.RequestCommandTask) (*schedTypes.ResponseCommandTask, error) {
 	if ops.User == "" {
 		ops.User = "root"
@@ -279,7 +280,7 @@ func (docker *DockerContainer) CreateContainer(containerName string, containerTa
 		PortBindings:    make(map[dockerclient.Port][]dockerclient.PortBinding),
 		Privileged:      containerTask.Privileged,
 		PublishAllPorts: containerTask.PublishAllPorts,
-		OOMKillDisable:  containerTask.OOMKillDisabled,
+		OOMKillDisable:  &containerTask.OOMKillDisabled,
 		ShmSize:         containerTask.ShmSize,
 		IpcMode:         containerTask.Ipc,
 	}
@@ -352,20 +353,10 @@ func (docker *DockerContainer) CreateContainer(containerName string, containerTa
 		hostConfig.Memory = int64(containerTask.Resource.Mem * 1024 * 1024)
 		hostConfig.MemorySwap = int64(containerTask.Resource.Mem * 1024 * 1024)
 	}
-	if float64(runtime.NumCPU()) > containerTask.Resource.Cpus && containerTask.Resource.CPUSet > 0 {
-		//only setting cpu info when cpu request can be met in slave host
-		cpuList, numaList := util.GetBindingCPUs(int(math.Ceil(containerTask.Resource.Cpus)), int64(containerTask.Resource.Mem))
-		if len(cpuList) > 0 {
-			//change int list to string
-			hostConfig.CPUSetCPUs = util.ListJoin(cpuList)
-			hostConfig.CPUSetMEMs = util.ListJoin(numaList)
-			fmt.Fprintf(os.Stdout, "DEBUG: CPU List info %v, numa: %v, post: %s, %s\n", cpuList, numaList, hostConfig.CPUSetCPUs, hostConfig.CPUSetMEMs)
-		}
-	}
 
 	if containerTask.LimitResource != nil && containerTask.LimitResource.Cpus > 0 {
-		hostConfig.CPUPeriod = DefaultDockerCpuPeriod
-		hostConfig.CPUQuota = int64(containerTask.LimitResource.Cpus * DefaultDockerCpuPeriod)
+		hostConfig.CPUPeriod = DefaultDockerCPUPeriod
+		hostConfig.CPUQuota = int64(containerTask.LimitResource.Cpus * DefaultDockerCPUPeriod)
 	}
 	if containerTask.LimitResource != nil && containerTask.LimitResource.Mem >= 4 {
 		hostConfig.Memory = int64(containerTask.LimitResource.Mem * 1024 * 1024)
@@ -446,15 +437,15 @@ func (docker *DockerContainer) StopContainer(containerName string, timeout int) 
 
 	done := make(chan error, 1)
 	func() {
-		fmt.Fprintf(os.Stdout, "start stop container %s", containerName)
+		fmt.Fprintf(os.Stdout, "start stop container %s\n", containerName)
 		err := docker.client.StopContainer(containerName, uint(timeout))
-		fmt.Fprintf(os.Stdout, "stop container %s done", containerName)
+		fmt.Fprintf(os.Stdout, "stop container %s done\n", containerName)
 		done <- err
 	}()
 
 	select {
 	case <-ticker:
-		fmt.Fprintf(os.Stdout, "stop container %s timeout", containerName)
+		fmt.Fprintf(os.Stdout, "stop container %s timeout\n", containerName)
 		return fmt.Errorf("stop container %s timeout", containerName)
 	case err := <-done:
 		return err
@@ -468,7 +459,7 @@ func (docker *DockerContainer) RemoveContainer(containerName string, force bool)
 		Force: force,
 	}
 	if err := docker.client.RemoveContainer(opt); err != nil {
-		fmt.Fprintf(os.Stderr, "Remove Container %s failed, err %s", containerName, err.Error())
+		fmt.Fprintf(os.Stderr, "Remove Container %s failed, err %s\n", containerName, err.Error())
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "Success to remove container %s\n", containerName)
@@ -486,11 +477,6 @@ func (docker *DockerContainer) KillContainer(containerName string, signal int) e
 
 //InspectContainer inspect container by name
 func (docker *DockerContainer) InspectContainer(containerName string) (*BcsContainerInfo, error) {
-	if docker.client == nil {
-		err := fmt.Errorf("docker client is nil")
-		logs.Infof(err.Error())
-		return nil, err
-	}
 	container, err := docker.client.InspectContainer(containerName)
 	if err != nil {
 		return nil, err
@@ -506,6 +492,7 @@ func (docker *DockerContainer) InspectContainer(containerName string) (*BcsConta
 		ExitCode:    container.State.ExitCode,
 		Hostname:    container.Config.Hostname,
 		NetworkMode: container.HostConfig.NetworkMode,
+		OOMKilled:   container.State.OOMKilled,
 		Resource: &schedTypes.Resource{
 			Cpus: float64(container.HostConfig.CPUShares / 1024),
 			Mem:  float64(container.HostConfig.Memory / 1024 / 1024),
@@ -565,22 +552,30 @@ func (docker *DockerContainer) ListImage(filter string) ([]*BcsImage, error) {
 	return bcsImages, nil
 }
 
-func (docker *DockerContainer) UpdateResources(id string, resource *schedTypes.Resource) error {
-	if resource.Cpus < 0 || resource.Mem < 4 {
-		return fmt.Errorf("container resource cpu %f memory %f is invalid", resource.Cpus, resource.Mem)
+// UpdateResources update container resource in runtime
+func (docker *DockerContainer) UpdateResources(id string, resource *schedTypes.TaskResources) error {
+	if resource == nil {
+		return fmt.Errorf("container resource to update cannot be empty")
+	}
+	if *resource.Cpu < 0 || *resource.Mem < 4 || *resource.ReqCpu < 0 || *resource.ReqMem < 4 {
+		return fmt.Errorf("container resource reqCpu %f reqMem %f cpu %f memory %f is invalid",
+			*resource.ReqCpu, *resource.ReqMem, *resource.Cpu, *resource.Mem)
 	}
 
-	logs.Infof("update container %s resources cpu %f mem %f", id, resource.Cpus, resource.Mem)
+	logs.Infof("update container %s resources cpu %f mem %f", id, *resource.Cpu, *resource.Mem)
 
 	options := dockerclient.UpdateContainerOptions{
-		CPUShares:  int(resource.Cpus * 1024),
-		Memory:     int(resource.Mem * 1024 * 1024),
-		MemorySwap: int(resource.Mem * 1024 * 1024),
+		CPUShares:  int(*resource.ReqCpu * 1024),
+		CPUPeriod:  DefaultDockerCPUPeriod,
+		CPUQuota:   int(*resource.Cpu * DefaultDockerCPUPeriod),
+		Memory:     int(*resource.Mem * 1024 * 1024),
+		MemorySwap: int(*resource.Mem * 1024 * 1024),
 	}
 
 	return docker.client.UpdateContainer(id, options)
 }
 
+// CommitImage create image from running container
 func (docker *DockerContainer) CommitImage(id, image string) error {
 	repo, tag := dockerclient.ParseRepositoryTag(image)
 

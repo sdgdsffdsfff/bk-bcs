@@ -14,15 +14,16 @@
 package master
 
 import (
-	"bk-bcs/bcs-common/common/blog"
-	bcstypes "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-common/common/zkclient"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	bcstypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/common/zkclient"
 
 	zktype "github.com/samuel/go-zookeeper/zk"
 	"golang.org/x/net/context"
@@ -85,7 +86,7 @@ func (zk *ZookeeperMaster) Finit() {
 	zk.client = nil
 }
 
-//Register registery infomation to storage
+//Register registery information to storage
 func (zk *ZookeeperMaster) Register() error {
 	if err := zk.createSelfNode(); err != nil {
 		return err
@@ -231,7 +232,7 @@ func (zk *ZookeeperMaster) masterLoop() {
 			zk.isMaster = false
 		}
 	} else {
-		blog.Warnf("zookeeper master get emtpy data with first node %s", nodepath)
+		blog.Warnf("zookeeper master get empty data with first node %s", nodepath)
 		zk.isMaster = false
 	}
 	select {
@@ -245,12 +246,12 @@ func (zk *ZookeeperMaster) masterLoop() {
 			return
 		}
 		if event.Type == zktype.EventSession {
-			blog.Warnf("zookeeper happend EventSession in children watch.")
+			blog.Warnf("zookeeper happened EventSession in children watch.")
 			go zk.masterLoop()
 			return
 		}
 		if event.Type == zktype.EventNotWatching {
-			blog.Warnf("zookeeper happend EventNotWatching in children watch. try to watch again")
+			blog.Warnf("zookeeper happened EventNotWatching in children watch. try to watch again")
 			go zk.masterLoop()
 			return
 		}
@@ -263,6 +264,9 @@ func (zk *ZookeeperMaster) masterLoop() {
 func (zk *ZookeeperMaster) healthLoop() {
 	masterTick := time.NewTicker(time.Second * 2)
 	selfTick := time.NewTicker(time.Second * 30)
+	defer masterTick.Stop()
+	defer selfTick.Stop()
+
 	for {
 		select {
 		case <-zk.exitCxt.Done():
@@ -299,14 +303,27 @@ func (zk *ZookeeperMaster) sortNodes(nodes []string) []string {
 	var sortPart []int
 	mapSortNode := make(map[int]string)
 	for _, chNode := range nodes {
-		p, _ := strconv.Atoi(chNode[len(chNode)-10 : len(chNode)])
+		if len(chNode) <= 10 {
+			fmt.Printf("node(%s) is less then 10, there is not the seq number\n", chNode)
+			continue
+		}
+
+		p, err := strconv.Atoi(chNode[len(chNode)-10:])
+		if err != nil {
+			fmt.Printf("fail to conv string to seq number for node(%s), err:%s\n", chNode, err.Error())
+			continue
+		}
+
 		sortPart = append(sortPart, p)
 		mapSortNode[p] = chNode
 	}
+
 	sort.Ints(sortPart)
-	var sorted []string
+
+	var children []string
 	for _, part := range sortPart {
-		sorted = append(sorted, mapSortNode[part])
+		children = append(children, mapSortNode[part])
 	}
-	return sorted
+
+	return children
 }

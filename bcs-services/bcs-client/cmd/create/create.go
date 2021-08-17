@@ -14,17 +14,16 @@
 package create
 
 import (
-	"fmt"
-
-	"bk-bcs/bcs-services/bcs-client/cmd/utils"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/utils"
 
 	"github.com/urfave/cli"
 )
 
+//NewCreateCommand sub command create registration
 func NewCreateCommand() cli.Command {
 	return cli.Command{
 		Name:  "create",
-		Usage: "create new application/process/service/secret/configmap/deployment",
+		Usage: "create new application/process/service/secret/configmap/deployment/user/meshcluster/logcollectiontask/datacleanstrategy/dataid",
 		Flags: []cli.Flag{
 			cli.StringFlag{
 				Name:  "from-file, f",
@@ -36,14 +35,19 @@ func NewCreateCommand() cli.Command {
 			},
 			cli.StringFlag{
 				Name:  "type, t",
-				Usage: "Create type, value can be app/service/secret/configmap/deployment",
+				Usage: "Create type, value can be app/service/secret/configmap/deployment/user/daemonset/logcollectiontask/datacleanstrategy/dataid",
+			},
+			cli.StringFlag{
+				Name:  "usertype",
+				Usage: "user type, value can be admin/saas/plain",
+			},
+			cli.StringFlag{
+				Name:  "username",
+				Usage: "user name",
 			},
 		},
 		Action: func(c *cli.Context) error {
-			if err := create(utils.NewClientContext(c)); err != nil {
-				return err
-			}
-			return nil
+			return create(utils.NewClientContext(c))
 		},
 	}
 }
@@ -68,7 +72,22 @@ func create(c *utils.ClientContext) error {
 		return createService(c)
 	case "deploy", "deployment":
 		return createDeployment(c)
+	case "crd", "customresourcedefinition":
+		return createCustomResourceDefinition(c)
+	case "user":
+		return createUser(c)
+	case "daemonset":
+		return createDaemonset(c)
+	case "logcollectiontask":
+		return createLogCollectionTask(c)
+	case "datacleanstrategy":
+		return createCleanStrategy(c)
+	case "dataid":
+		return createDataID(c)
+	case "meshcluster":
+		return createMeshCluster(c)
 	default:
-		return fmt.Errorf("invalid type: %s", resourceType)
+		//unkown type, try CustomResource
+		return createCustomResource(c)
 	}
 }

@@ -14,7 +14,7 @@
 package config
 
 import (
-//"bk-bcs/bcs-common/common/static"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/registry"
 )
 
 //CertConfig is configuration of Cert
@@ -28,8 +28,10 @@ type CertConfig struct {
 
 //MesosDriverConfig is a configuration of mesos driver
 type MesosDriverConfig struct {
-	Address string
-	Port    uint
+	Address      string
+	Port         uint
+	ExternalIp   string
+	ExternalPort uint
 
 	MetricPort uint
 
@@ -41,4 +43,16 @@ type MesosDriverConfig struct {
 	ClientCert *CertConfig
 
 	AdmissionWebhook bool
+	//KubeConfig kubeconfig for CustomResource
+	KubeConfig string
+	//MesosWebconsoleProxyPort
+	MesosWebconsoleProxyPort uint
+
+	// websocket register
+	RegisterWithWebsocket bool
+	RegisterToken         string
+	RegisterURL           string
+	InsecureSkipVerify    bool
+
+	Etcd *registry.CMDOptions
 }

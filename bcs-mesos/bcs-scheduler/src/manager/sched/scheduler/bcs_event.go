@@ -14,22 +14,24 @@
 package scheduler
 
 import (
-	rd "bk-bcs/bcs-common/common/RegisterDiscover"
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-common/common/http/httpclient"
-	"bk-bcs/bcs-common/common/static"
-	commtypes "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/util"
 	"encoding/json"
 	"fmt"
 	"runtime"
 	"strconv"
 	"sync"
 	"time"
+
+	rd "github.com/Tencent/bk-bcs/bcs-common/common/RegisterDiscover"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/common/http/httpclient"
+	"github.com/Tencent/bk-bcs/bcs-common/common/static"
+	commtypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/util"
 )
 
 const (
-	MaxEventQueueLength = 1024
+	//MaxEventQueueLength event queue size
+	MaxEventQueueLength = 10240
 )
 
 type bcsEventManager struct {
@@ -93,8 +95,10 @@ func (e *bcsEventManager) initCli() {
 
 // Send Event
 func (e *bcsEventManager) syncEvent(event *commtypes.BcsStorageEventIf) error {
-	blog.V(3).Infof("bcsEventManager syncEvent %v", event)
-
+	queue := len(e.eventQueue)
+	if queue > 1024 {
+		blog.Infof("bcsEventManager syncEvent %v queue(%d)", event, len(e.eventQueue))
+	}
 	e.eventQueue <- event
 	return nil
 }
@@ -135,6 +139,7 @@ func (e *bcsEventManager) discvstorage() {
 	blog.Infof("watch storage under (%s: %s), current goroutine num(%d)", e.bcsZk, discvPath, runtime.NumGoroutine())
 
 	tick := time.NewTicker(180 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-tick.C:
@@ -185,6 +190,7 @@ func (e *bcsEventManager) discvstorage() {
 func (e *bcsEventManager) handleEventQueue() {
 
 	tick := time.NewTicker(time.Second * 10)
+	defer tick.Stop()
 
 	var err error
 
@@ -211,8 +217,13 @@ func (e *bcsEventManager) handleEvent(event *commtypes.BcsStorageEventIf) error 
 	by, _ := json.Marshal(event)
 
 	uri := "events"
-
+	begin := time.Now().UnixNano() / 1e6
 	_, err := e.requestStorageV1("PUT", uri, by)
+	end := time.Now().UnixNano() / 1e6
+	useTime := end - begin
+	if useTime > 100 {
+		blog.Warnf("request storage event, %dms slow query", useTime)
+	}
 	return err
 }
 

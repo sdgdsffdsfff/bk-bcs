@@ -14,14 +14,15 @@
 package cni
 
 import (
-	"bk-bcs/bcs-mesos/bcs-container-executor/container"
-	"bk-bcs/bcs-mesos/bcs-container-executor/logs"
-	"bk-bcs/bcs-mesos/bcs-container-executor/network"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/container"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/logs"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/network"
 
 	"github.com/containernetworking/cni/libcni"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
@@ -110,26 +111,6 @@ func (plugin *CNIPlugin) Name() string {
 func (plugin *CNIPlugin) Init(host string) error {
 	return nil
 }
-
-//Status get network status, Status only work after SetUpPod
-/*func (plugin *CNIPlugin) Status() *network.NetStatus {
-	if plugin.status != nil {
-		return plugin.status
-	}
-	return nil
-}*/
-
-//Version call plugin command line and return version string
-/*func (plugin *CNIPlugin) Version() string {
-	info, err := plugin.cniNet.GetVersionInfo(plugin.networkName)
-	if err != nil {
-		logs.Errorf("CNI Plugin %s VERSION command err: %s\n", plugin.networkName, err.Error())
-		return ""
-	}
-	vers := info.SupportedVersions()
-	lastVer := vers[len(vers)-1]
-	return lastVer
-}*/
 
 //SetUpPod Setup Network info for pod
 func (plugin *CNIPlugin) SetUpPod(podInfo container.Pod) error {
@@ -256,9 +237,11 @@ func (plugin *CNIPlugin) addNetworkV2(runConf *libcni.RuntimeConf) (*current.Res
 	var r cnitypes.Result
 	if plugin.isCniList {
 		r, err = plugin.cniNet.AddNetworkList(plugin.netConfList, runConf)
-
 	} else {
 		r, err = plugin.cniNet.AddNetwork(plugin.netConf, runConf)
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	// Convert whatever the IPAM result was into the current Result type

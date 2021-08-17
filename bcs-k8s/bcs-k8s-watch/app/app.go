@@ -14,7 +14,6 @@
 package app
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -23,19 +22,15 @@ import (
 	"syscall"
 	"time"
 
-	"bk-bcs/bcs-common/common/types"
-	bcsVersion "bk-bcs/bcs-common/common/version"
-	"bk-bcs/bcs-k8s/bcs-k8s-watch/app/bcs"
-	"bk-bcs/bcs-k8s/bcs-k8s-watch/app/k8s"
-	"bk-bcs/bcs-k8s/bcs-k8s-watch/app/options"
-	"bk-bcs/bcs-k8s/bcs-k8s-watch/app/output"
-	"bk-bcs/bcs-k8s/bcs-k8s-watch/app/output/action"
+	"github.com/Tencent/bk-bcs/bcs-k8s/bcs-k8s-watch/app/bcs"
+	"github.com/Tencent/bk-bcs/bcs-k8s/bcs-k8s-watch/app/k8s"
+	"github.com/Tencent/bk-bcs/bcs-k8s/bcs-k8s-watch/app/options"
+	"github.com/Tencent/bk-bcs/bcs-k8s/bcs-k8s-watch/app/output"
 
-	global "bk-bcs/bcs-common/common"
-	glog "bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-common/common/metric"
-	disbcs "bk-bcs/bcs-k8s/bcs-k8s-watch/pkg/discovery/bcs"
-	disreg "bk-bcs/bcs-k8s/bcs-k8s-watch/pkg/discovery/register"
+	global "github.com/Tencent/bk-bcs/bcs-common/common"
+	glog "github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/common/static"
+	"github.com/Tencent/bk-bcs/bcs-k8s/bcs-k8s-watch/app/k8s/resources"
 )
 
 var globalStopChan = make(chan struct{})
@@ -93,6 +88,7 @@ func savePID(pidFilePath string) error {
 	return nil
 }
 
+// PrepareRun checks configuration for running
 func PrepareRun(configFilePath string, pidFilePath string) error {
 	err := savePID(pidFilePath)
 	if err != nil {
@@ -103,174 +99,117 @@ func PrepareRun(configFilePath string, pidFilePath string) error {
 	return err
 }
 
-func Run(configFilePath string) error {
-	// 1. init configTODO
-	glog.Info("Init config begin......")
-	watchConfig, err := options.ParseConfigFile(configFilePath)
-	if err != nil {
-		panic(err.Error())
+// Run entrypoint for k8s-watch
+func Run(watchConfig *options.WatchConfig) error {
+	if len(watchConfig.BCS.NetServiceZKHosts) == 0 {
+		watchConfig.BCS.NetServiceZKHosts = watchConfig.BCS.ZkHosts
 	}
 
-	glog.Info("Init config DONE!")
-
-	zkHosts := strings.Join(watchConfig.BCS.ZkHosts, ",")
-	hostIP := watchConfig.Default.HostIP
-	bcsTLSConfig := watchConfig.BCS.TLS
-
-	var clusterID string
-	// 1.1 get clusterID
-	// Get ClusterID via ClusterKeeper
-	glog.Info("Get ClusterID begin......")
-	if watchConfig.Default.ClusterIDSource == options.ClusterIDSourceClusterKeeper {
-		clusterID, err = bcs.GetClusterID(zkHosts, hostIP, bcsTLSConfig)
-		if err != nil {
-			panic(err.Error())
-		}
+	if err := global.SavePid(watchConfig.ProcessConfig); err != nil {
+		glog.Warn("fail to save pid. err:%s", err.Error())
 	} else {
-		// Read ClusterID from config file
-		clusterID = watchConfig.Default.ClusterID
+		glog.Infof("save pid successful")
 	}
-	glog.Info("Get ClusterID DONE! ClusterID=%s", clusterID)
 
-	// Get current node info to register it to zookeeper
-	hostname, _ := os.Hostname()
-	serverInfo := types.ServerInfo{
-		IP:       hostIP,
-		Port:     0,
-		HostName: hostname,
-		Scheme:   "",
-		Cluster:  clusterID,
-		Version:  bcsVersion.GetVersion(),
-		Pid:      os.Getpid(),
-	}
-	node := disbcs.NewServiceNode(serverInfo)
+	glog.Info("Get ClusterID DONE! ClusterID=%s", watchConfig.Default.ClusterID)
 
-	// Register current node info to zookeeper and start discovering
-	basePath := fmt.Sprintf("%s/%s/%s",
-		types.BCS_SERV_BASEPATH,
-		types.BCS_MODULE_KUBEDATAWATCH,
-		clusterID,
-	)
-	reg := disreg.NewNodeRegister(zkHosts, basePath, &node)
-	if err := reg.DoRegister(); err != nil {
-		return fmt.Errorf("unable to register data-watch: %s", err)
-	}
-	go reg.StartDiscover(0)
-
-	// Start leadereletor
-	callbacks := &disbcs.LeaderCallbacks{
-		OnStartedLeading: func(stop <-chan struct{}) {
-			glog.Info("I'm leader.")
-			stopChan := make(chan struct{})
-			go RunAsLeader(stopChan, watchConfig, clusterID)
-
-			// Stop RunAsLeader by forward the stop event
-			select {
-			case <-stop:
-				// Closed by leaderElector
-				close(stopChan)
-				// Closed by global signal handler
-			case <-globalStopChan:
-				close(stopChan)
-			}
-		},
-		OnStoppedLeading: func() {
-			glog.Info("I'm slave now.")
-		},
-	}
-	elector := disbcs.NewLeaderElector(reg, callbacks)
-
+	glog.Info("I'm leader.")
+	stopChan := make(chan struct{})
+	go RunAsLeader(stopChan, watchConfig, watchConfig.Default.ClusterID)
 	go signalListen()
-	go elector.Run()
 
-	<-globalStopChan
-	return nil
-}
-
-func startMetricForMaster(moduleIP, clusterID string) error {
-	// NOTE: will use the IP:MetricPort as the listen addr
-	c := metric.Config{
-		ModuleName:          "k8s-watch",
-		IP:                  moduleIP,
-		MetricPort:          9089,
-		DisableGolangMetric: true,
-		ClusterID:           clusterID,
-	}
-	healthz := func() metric.HealthMeta {
-		return metric.HealthMeta{
-			CurrentRole: "Master",
-			IsHealthy:   true,
-		}
-	}
-	if err := metric.NewMetricController(c, healthz); err != nil {
-		fmt.Printf("new metric collector failed. err: %v\n", err)
-		return err
+	// Stop RunAsLeader by forward the stop event
+	select {
+	// Closed by global signal handler
+	case <-globalStopChan:
+		close(stopChan)
 	}
 	return nil
 }
 
 // RunAsLeader do the leader stuff
 func RunAsLeader(stopChan <-chan struct{}, config *options.WatchConfig, clusterID string) error {
-	zkHosts := strings.Join(config.BCS.ZkHosts, ",")
 	bcsTLSConfig := config.BCS.TLS
 
-	// 1.1 get storage service
-	glog.Info("Get StorageService begin......")
-	storageService, err := bcs.GetStorageService(zkHosts, bcsTLSConfig, config.BCS.CustomStorageEndpoints)
+	glog.Info("getting storage service now...")
+	storageService, _, err := bcs.GetStorageService(config.BCS.ZkHosts, bcsTLSConfig, config.BCS.CustomStorageEndpoints, config.BCS.IsExternal)
 	if err != nil {
-		panic(err.Error())
+		panic(err)
 	}
-	glog.Info("Get StorageService DONE!")
+	glog.Info("get storage service done")
 
-	// sleep for 5 seconds, wait
-	glog.Infof("sleep for 5 seconds, wait for fetching storage address from zk")
+	glog.Info("getting netservice now...")
+	netservice, netserviceZKRD, err := bcs.GetNetService(config.BCS.NetServiceZKHosts, bcsTLSConfig, config.BCS.CustomNetServiceEndpoints, false)
+	if err != nil {
+		panic(err)
+	}
+	glog.Info("get netservice done")
+
+	// waiting for netservice discovery
 	time.Sleep(5 * time.Second)
-	if len(storageService.Servers) == 0 && config.Default.Environment != "development" {
-		glog.Infof("got non storage service address, sleep for another again")
-		time.Sleep(5 * time.Second)
-		if len(storageService.Servers) == 0 {
-			panic(errors.New("can't get storage service address from zk after 10 seconds, quit"))
+	if len(netservice.Servers()) == 0 {
+		glog.Infof("got non netservice address this moment")
+	}
+
+	// init server actions && register web server && register metrics server
+	glog.Info("start http server")
+	certConfig := bcs.CertConfig{
+		CAFile:   config.CAFile,
+		CertFile: config.ServerCertFile,
+		KeyFile:  config.ServerKeyFile,
+		CertPwd:  static.ServerCertPwd,
+	}
+	httpServer := bcs.GetHTTPServer(config, bcs.WithCertConfig(certConfig), bcs.WithDebug(config.DebugMode))
+	go func() {
+		err = httpServer.ListenAndServe()
+		if err != nil {
+			glog.Errorf("http listen and serve failed: %v", err)
+			close(globalStopChan)
 		}
-	}
+	}()
 
-	// 1.2 init alertor with bcs-health
-	moduleIP := config.Default.HostIP
-	alertor, err := action.NewAlertor(clusterID, moduleIP, zkHosts, config.BCS.TLS)
+	bcs.RunPrometheusMetricsServer(config)
+	glog.Info("start http server successful")
+
+	// init resourceList to watch
+	err = resources.InitResourceList(&config.K8s)
 	if err != nil {
-		glog.Errorf("Init Alertor fail, no alarm will be sent!")
+		panic(err)
 	}
 
-	// 2. create writer and init
-	glog.Info("New and init Writer begin......")
-	writer, err := output.NewWriter(clusterID, storageService, alertor)
+	// create writer.
+	glog.Info("creating writer now...")
+	writer, err := output.NewWriter(clusterID, storageService, config.BCS)
 	if err != nil {
-		panic(err.Error())
+		panic(err)
 	}
-	glog.Info("New and init Writer DONE!")
+	glog.Info("create writer success")
 
-	// 3. create cluster with watchers
-	glog.Info("New and init Cluster with list-watch begin......")
-	cluster, err := k8s.NewCluster(writer, &config.K8s, clusterID, storageService)
+	glog.Info("starting writer now...")
+	if err := writer.Run(stopChan); err != nil {
+		panic(err)
+	}
+	glog.Info("start writer success")
+
+	// create watcher manager.
+	glog.Info("creating watcher manager now...")
+	watcherMgr, err := k8s.NewWatcherManager(clusterID, writer, &config.K8s, storageService, netservice, stopChan)
 	if err != nil {
-		panic(err.Error())
+		panic(err)
 	}
-	glog.Info("New and init Cluster with list-watch DONE!")
+	glog.Info("create watcher manager success")
 
-	glog.Info("start cluster and writer......")
-	go writer.Run(stopChan)
-	go cluster.Run(stopChan)
-
-	// finally, start metric, allow fail
-	glog.Info("start metric......")
-	err = startMetricForMaster(moduleIP, clusterID)
-	if err != nil {
-		glog.Errorf("Init metric fail, the metric and health will not be ok!")
-	}
-
-	// glog.Infof("start health checker......")
-	// h := HealthChecker{}
-	// go h.Run(stopChan)
+	glog.Info("start watcher manager now...")
+	watcherMgr.Run(stopChan)
+	glog.Info("start watcher manager success")
 
 	<-stopChan
+
+	// stop all kubefed watchers
+	watcherMgr.StopCrdWatchers()
+
+	// stop service discovery.
+	netserviceZKRD.Stop()
+
 	return nil
 }

@@ -18,11 +18,11 @@ import (
 	"encoding/binary"
 	"unsafe"
 
-	"bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
 )
 
 // ProtocolMagicNum 防篡改魔法数字
-const ProtocolMagicNum uint64 = 0X75062D90E03C798A
+const ProtocolMagicNum uint64 = 0x75062D90E03C798A
 
 // MsgHead 通讯协议头协议头定义
 type MsgHead struct {

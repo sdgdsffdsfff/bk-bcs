@@ -14,8 +14,10 @@
 package options
 
 import (
-	"bk-bcs/bcs-common/common/conf"
-	"bk-bcs/bcs-common/common/static"
+	"github.com/Tencent/bk-bcs/bcs-common/common/conf"
+	"github.com/Tencent/bk-bcs/bcs-common/common/static"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/registry"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/tracing"
 )
 
 //CertConfig is configuration of Cert
@@ -39,12 +41,15 @@ type StorageOptions struct {
 	conf.ProcessConfig
 
 	ServerCert *CertConfig
+	Etcd       registry.CMDOptions `json:"etcdRegistry"`
+	Tracing    tracing.Options     `json:"tracing"`
 
 	DBConfig     string `json:"database_config_file" value:"storage-database.conf" usage:"Config file for database."`
+	QueueConfig  string `json:"queue_config_file" value:"queue.conf" usage:"Config file for database."`
 	EventMaxTime int64  `json:"event_max_day" value:"15" usage:"Max day for holding events data."`
-	EventMaxCap  int    `json:"event_max_cap" value:"10000" usage:"Max num for holding events data of each cluster."`
+	EventMaxCap  int64  `json:"event_max_cap" value:"10000" usage:"Max num for holding events data of each cluster."`
 	AlarmMaxTime int64  `json:"alarm_max_day" value:"15" usage:"Max day for holding alarms data."`
-	AlarmMaxCap  int    `json:"alarm_max_cap" value:"10000" usage:"Max num for holding alarms data of each cluster."`
+	AlarmMaxCap  int64  `json:"alarm_max_cap" value:"10000" usage:"Max num for holding alarms data of each cluster."`
 	QueryMaxNum  int64  `json:"query_max_num" value:"100" usage:"Max num query to same url one time."`
 	WatchTimeSep int64  `json:"watch_time_sep" value:"10" usage:"Request watch time sep."`
 	PrintBody    bool   `json:"print_body" value:"false" usage:"Print body every request."`
@@ -59,5 +64,6 @@ func NewStorageOptions() *StorageOptions {
 			CertPwd: static.ServerCertPwd,
 			IsSSL:   false,
 		},
+		Etcd: registry.CMDOptions{},
 	}
 }

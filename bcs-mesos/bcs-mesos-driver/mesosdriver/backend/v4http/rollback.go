@@ -14,14 +14,15 @@
 package v4http
 
 import (
-	"bk-bcs/bcs-common/common"
-	"bk-bcs/bcs-common/common/blog"
-	bhttp "bk-bcs/bcs-common/common/http"
-	bcstype "bk-bcs/bcs-common/common/types"
 	"encoding/json"
+	"github.com/Tencent/bk-bcs/bcs-common/common"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	bhttp "github.com/Tencent/bk-bcs/bcs-common/common/http"
+	bcstype "github.com/Tencent/bk-bcs/bcs-common/common/types"
 	"strconv"
 )
 
+//RollbackApplication application rollback implementation
 func (s *Scheduler) RollbackApplication(body []byte, kind bcstype.BcsDataType) (string, error) {
 	blog.Info("rollback application. param(%s)", string(body))
 	var param bcstype.ReplicaController
@@ -38,7 +39,7 @@ func (s *Scheduler) RollbackApplication(body []byte, kind bcstype.BcsDataType) (
 		return err.Error(), err
 	}
 
-	version.RawJson = &param
+	//version.RawJson = &param
 
 	// post version to bcs-mesos-scheduler, /v1/apps
 	data, err := json.Marshal(version)

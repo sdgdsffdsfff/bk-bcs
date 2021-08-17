@@ -14,9 +14,6 @@
 package app
 
 import (
-	"bk-bcs/bcs-mesos/bcs-container-executor/container"
-	"bk-bcs/bcs-mesos/bcs-container-executor/logs"
-	bcstype "bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -25,7 +22,11 @@ import (
 	"strconv"
 	"time"
 
-	commtypes "bk-bcs/bcs-common/common/types"
+	commtypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	bcstype "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/container"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/logs"
+
 	"github.com/golang/protobuf/proto"
 )
 
@@ -66,8 +67,8 @@ func (executor *BcsExecutor) frameworkMessageEnvironmentUpdate(taskID string, en
 	command = append(command, envshell)
 
 	for _, ID := range containerList {
-		if err := executor.container.RunCommand(ID, command); err != nil {
-			err = fmt.Errorf("Update Environment %s failed: %s", envshell, err.Error())
+		if runErr := executor.container.RunCommand(ID, command); runErr != nil {
+			err = fmt.Errorf("Update Environment %s failed: %s", envshell, runErr.Error())
 		}
 	}
 
@@ -153,8 +154,8 @@ func (executor *BcsExecutor) frameworkMessageSignalExecute(taskID string, singal
 
 	for _, ID := range containerList {
 		logs.Infof("execute shell command ##%s## in container %s", command, ID)
-		if err := executor.container.RunCommand(ID, command); err != nil {
-			err = fmt.Errorf("Sending  %s failed: %s", command, err.Error())
+		if runErr := executor.container.RunCommand(ID, command); runErr != nil {
+			err = fmt.Errorf("Sending  %s failed: %s", command, runErr.Error())
 		}
 	}
 
@@ -175,12 +176,7 @@ func (executor *BcsExecutor) frameworkMessageUpdateResources(msg *bcstype.Msg_Up
 			return err
 		}
 
-		resource := &bcstype.Resource{
-			Cpus: *update.Cpu,
-			Mem:  *update.Mem,
-		}
-
-		err = executor.podInst.UpdateResources(container.ID, resource)
+		err = executor.podInst.UpdateResources(container.ID, update)
 		if err != nil {
 			err = fmt.Errorf("update taskid %s resource error %s", *update.TaskId, err.Error())
 			return err
@@ -258,7 +254,7 @@ func (executor *BcsExecutor) frameworkMessageCommandTask(msg *bcstype.RequestCom
 **/
 
 const (
-	defaultHttpRequestTimeout = 120
+	defaultHTTPRequestTimeout = 120
 )
 
 //dataClassRemote handle bcs_remote message, download data from remote http url, push to created container
@@ -316,7 +312,7 @@ func (executor *BcsExecutor) downloadRemoteFile(remote *bcstype.Msg_Remote) (*bc
 
 	//download content from remote http url.
 	client := http.Client{
-		Timeout: time.Duration(defaultHttpRequestTimeout * time.Second),
+		Timeout: time.Duration(defaultHTTPRequestTimeout * time.Second),
 	}
 	request, reqErr := http.NewRequest("GET", *remote.From, nil)
 	if reqErr != nil {

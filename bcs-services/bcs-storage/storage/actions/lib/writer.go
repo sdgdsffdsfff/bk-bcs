@@ -16,13 +16,14 @@ package lib
 import (
 	"net/http"
 
-	"bk-bcs/bcs-common/common"
-	"bk-bcs/bcs-common/common/blog"
-	http2 "bk-bcs/bcs-common/common/http"
+	"github.com/Tencent/bk-bcs/bcs-common/common"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	http2 "github.com/Tencent/bk-bcs/bcs-common/common/http"
 
 	"github.com/emicklei/go-restful"
 )
 
+//RestResponse wrapper for restful Response
 type RestResponse struct {
 	Resp     *restful.Response
 	HTTPCode int
@@ -35,6 +36,7 @@ type RestResponse struct {
 	WrapFunc func([]byte) []byte
 }
 
+//ReturnRest common restfult response
 func ReturnRest(resp *RestResponse) {
 	if resp.HTTPCode == 0 {
 		resp.HTTPCode = http.StatusOK

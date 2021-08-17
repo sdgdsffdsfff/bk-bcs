@@ -16,16 +16,18 @@ package operator
 import (
 	"encoding/json"
 	"fmt"
-	//"strconv"
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/client"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store"
-	master "bk-bcs/bcs-mesos/bcs-scheduler/src/mesosproto/mesos/master"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/types"
-	"github.com/golang/protobuf/proto"
-	"github.com/samuel/go-zookeeper/zk"
 	"net/http"
+	"reflect"
 	"time"
+
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	master "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/mesosproto/mesos/master"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/client"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/util"
+
+	"github.com/golang/protobuf/proto"
 )
 
 // interval for synchronize agents from mesos master, seconds
@@ -86,8 +88,8 @@ func (mgr *OperatorMgr) SendMsg(msg *OperatorMsg) error {
 func OperatorManage(mgr *OperatorMgr) {
 	blog.Info("update agents: goroutine start ...")
 
-	//blog.V(3).Infof("update agents: to sync agents sync mesos master to DB")
-	//mgr.updateAgents()
+	blog.V(3).Infof("update agents: to sync agents sync mesos master to DB")
+	mgr.UpdateMesosAgents()
 
 	for {
 		select {
@@ -105,21 +107,13 @@ func OperatorManage(mgr *OperatorMgr) {
 			}
 		case <-time.After(time.Second * time.Duration(AGENT_SYNC_INTERVAL)):
 			blog.Info("update agents: to sync agents from mesos master to DB")
-			mgr.updateAgents()
+			mgr.UpdateMesosAgents()
 		}
 	}
-
 }
 
-func (mgr *OperatorMgr) updateAgents() {
-
-	if mgr.openCheck == false {
-		blog.Info("update agents: opencheck is false, do nothing")
-		return
-	}
-
+func (mgr *OperatorMgr) UpdateMesosAgents() {
 	blog.Info("update agents: begin")
-
 	call := &master.Call{
 		Type: master.Call_GET_AGENTS.Enum(),
 	}
@@ -148,9 +142,6 @@ func (mgr *OperatorMgr) updateAgents() {
 		return
 	}
 
-	//body, _ := ioutil.ReadAll(resp.Body)
-	//blog.Info("master response body:%s\n", string(body))
-
 	var response master.Response
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		blog.Error("update agents: Decode response failed: %s", err)
@@ -171,68 +162,36 @@ func (mgr *OperatorMgr) updateAgents() {
 
 	var agent types.Agent
 	for index, oneAgent := range agentInfo.Agents {
-
-		blog.V(3).Infof("update agents: ===>agent[%d]: name(%s), info(%s)", index, oneAgent.GetAgentInfo().GetHostname(), oneAgent.String())
-		//data, err := json.Marshal(oneAgent)
-		//if err != nil {
-		//	blog.Error("update agents: Marshal agent err(%s)", err.Error() )
-		//}
-		//blog.V(3).Infof("update agents: ===>agent[%d]: name(%s), info(%s)", index, oneAgent.GetAgentInfo().GetHostname(), string(data))
-
-		dbAgent, dbErr := mgr.store.FetchAgent(oneAgent.GetAgentInfo().GetHostname())
-		if dbAgent == nil && dbErr == zk.ErrNoNode {
-			blog.Warn("update agents: new agent(%s) come to online", oneAgent.GetAgentInfo().GetHostname())
-		}
-
-		agent.Key = oneAgent.GetAgentInfo().GetHostname()
-		agent.AgentInfo = oneAgent
-		//agent.Info = string(data)
-		agent.LastSyncTime = currTime
-		err = mgr.store.SaveAgent(&agent)
-		if err != nil {
-			blog.Error("update agents: save agent(%s) to db err:%s", oneAgent.GetAgentInfo().GetHostname(), err.Error())
-		} else {
-			blog.V(3).Infof("update agents: save agent(%s) to db succ", oneAgent.GetAgentInfo().GetHostname())
-		}
-	}
-
-	agentNodes, err := mgr.store.ListAgentNodes()
-	if err != nil {
-		blog.Error("update agents: fail to list agent nodes, err:%s", err.Error())
-		return
-	}
-	if nil == agentNodes {
-		blog.Warn("update agents: no agent nodes now")
-		return
-	}
-
-	currDBnum := len(agentNodes)
-	blog.Info("update agents: current db agents count(%d)", currDBnum)
-
-	offlineNum := 0
-	for index, agentNode := range agentNodes {
-		blog.V(3).Infof("update agents: to check agent[%d]:%s ", index, agentNode)
-		agent, err := mgr.store.FetchAgent(agentNode)
-		if agent == nil {
-			blog.Warn("update agents: listed but fetch agent:%s return nil", agentNode)
+		innerIP, _ := util.GetMesosAgentInnerIP(oneAgent.GetAgentInfo().GetAttributes())
+		if innerIP == "" {
+			blog.Errorf("mesos agent(%s) don't have InnerIP attribute", oneAgent.GetAgentInfo().GetHostname())
 			continue
 		}
 
-		//for multi-scheduler sync
-		if agent.LastSyncTime <= currTime-AGENT_SYNC_INTERVAL {
-			blog.Info("update agents: agent:%s is offline (LastSyncTime(%d) & currTime(%d))", agentNode, agent.LastSyncTime, currTime)
-			offlineNum++
-			err = mgr.store.DeleteAgent(agentNode)
-			if err != nil {
-				blog.Error("update agents: delete agent(%s) err:%s", agentNode, err.Error())
-			} else {
-				blog.V(3).Infof("update agents: delete agent(%s) from db succ", agentNode)
+		blog.Infof("update agents: ===>agent[%d]: name(%s), info(%s)", index, innerIP, oneAgent.String())
+		dbAgent, dbErr := mgr.store.FetchAgent(innerIP)
+		if dbAgent == nil && dbErr == store.ErrNoFound {
+			blog.Infof("update agents: new agent(%s) come to online", oneAgent.GetAgentInfo().GetHostname())
+		}
+
+		if dbAgent != nil {
+			if reflect.DeepEqual(dbAgent.AgentInfo, oneAgent) {
+				blog.Infof("new agent (%s) info no change", oneAgent.GetAgentInfo().GetHostname())
+				continue
 			}
+		}
+
+		agent.Key = innerIP
+		agent.AgentInfo = oneAgent
+		agent.LastSyncTime = currTime
+		err = mgr.store.SaveAgent(&agent)
+		if err != nil {
+			blog.Error("update agents: save agent(%s) to db err:%s", innerIP, err.Error())
 		} else {
-			blog.V(3).Infof("update agents: agent[%d]:%s is online now", index, agentNode)
+			blog.Infof("update agents: save agent(%s) to db succ", innerIP)
 		}
 	}
 
-	blog.Info("update agents: done ==> sync time(%d), mesos num(%d), DBnum(%d), offlineNum(%d) ", currTime, currSyncNum, currDBnum, offlineNum)
+	blog.Info("update agents: done ==> sync time(%d), mesos num(%d) ", currTime, currSyncNum)
 	return
 }

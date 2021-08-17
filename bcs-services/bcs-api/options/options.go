@@ -14,7 +14,7 @@
 package options
 
 import (
-	"bk-bcs/bcs-common/common/conf"
+	"github.com/Tencent/bk-bcs/bcs-common/common/conf"
 )
 
 //ServerOption is option in flags
@@ -39,8 +39,13 @@ type ServerOption struct {
 	Edition string `json:"edition" value:"ieod" usage:"api edition"`
 
 	MesosWebconsoleProxyPort uint `json:"mesos_webconsole_proxy_port" value:"8083" usage:"Port to connect to mesos webconsole proxy"`
+
+	TKE TKEOptions `json:"tke"`
+
+	PeerToken string `json:"peer_token" value:"" usage:"peer token to auth with each other, only used to websocket peer"`
 }
 
+// BKEOptions bke options
 type BKEOptions struct {
 	DSN                        string                     `json:"mysql_dsn" value:"" usage:"dsn for connect to mysql"`
 	BootStrapUsers             []BootStrapUser            `json:"bootstrap_users"`
@@ -53,17 +58,28 @@ type BKEOptions struct {
 	RbacDatas []RbacData `json:"rbac_data"`
 }
 
+//TKEOptions tke api operation operation
+type TKEOptions struct {
+	SecretId  string `json:"secret_id" value:"" usage:"tke user account secret id"`
+	SecretKey string `json:"secret_key" value:"" usage:"tke user account secret key"`
+	CcsHost   string `json:"ccs_host" value:"" usage:"tke ccs host domain"`
+	CcsPath   string `json:"ccs_path" value:"" usage:"tke ccs path"`
+}
+
+// RbacData rbac data for specified cluster
 type RbacData struct {
 	Username  string   `json:"user_name"`
 	ClusterId string   `json:"cluster_id"`
 	Roles     []string `json:"roles"`
 }
 
+//CredentialsFixturesOptions option for enable cluster specified token, deprecated
 type CredentialsFixturesOptions struct {
 	Enabled     bool         `json:"is_enabled_fixtures_credentials"`
 	Credentials []Credential `json:"credentials"`
 }
 
+// Credential specified token for cluster, deprecated
 type Credential struct {
 	ClusterID string `json:"cluster_id"`
 	Type      string `json:"type"`
@@ -72,27 +88,45 @@ type Credential struct {
 	Token     string `json:"token"`
 }
 
+//BootStrapUser user for system start up
 type BootStrapUser struct {
 	Name        string   `json:"name"`
 	IsSuperUser bool     `json:"is_super_user"`
 	Tokens      []string `json:"tokens"`
 }
 
+//AuthOption bkiam auth options
 type AuthOption struct {
-	Auth bool `json:"auth" value:"false" usage:"use auth mode or not" mapstructure:"auth"`
+	Auth          bool `json:"auth" value:"false" usage:"use auth mode or not" mapstructure:"auth"`
+	RemoteCheck   bool `json:"remote_check" value:"false" usage:"check auth in remote host or not" mapstructure:"remote_check"`
+	SkipNoneToken bool `json:"skip_none_token" value:"false" usage:"skip auth check when token no specified" mapstructure:"skip_none_token"`
+
+	Version string `json:"auth_version" value:"3" usage:"bkiam version, 2 or 3." mapstructure:"auth_version"`
 
 	ApiGwRsaFile string `json:"apigw_rsa_file" value:"" usage:"apigw rsa public key file" mapstructure:"apigw_rsa_file"`
 
 	AuthTokenSyncTime int `json:"auth_token_sync_time" value:"10" usage:"time ticker for syncing token in cache, seconds" mapstructure:"auth_token_sync_time"`
 
-	BKIamAuthHost       string   `json:"bkiam_auth_host" value:"" usage:"bkiam auth server host" mapstructure:"bkiam_auth_host"`
-	BKIamAuthAppCode    string   `json:"bkiam_auth_app_code" value:"" usage:"app code for communicating with auth" mapstructure:"bkiam_auth_app_code"`
-	BKIamAuthAppSecret  string   `json:"bkiam_auth_app_secret" value:"" usage:"app secret for communicating with auth" mapstructure:"bkiam_auth_app_secret"`
-	BKIamAuthSystemID   string   `json:"bkiam_auth_system_id" value:"" usage:"system id in auth service" mapstructure:"bkiam_auth_system_id"`
-	BKIamAuthScopeID    string   `json:"bkiam_auth_scope_id" value:"" usage:"scope id in auth service" mapstructure:"bkiam_auth_scope_id"`
-	BKIamZookeeper      string   `json:"bkiam_auth_zookeeper" value:"" usage:"zookeeper for auth token storage" mapstructure:"bkiam_auth_zookeeper"`
-	BKIamTokenWhiteList []string `json:"bkiam_auth_token_whitelist" value:"" usage:"token whitelist for bkiam"`
-	BKIamAuthSubServer  string   `json:"bkiam_auth_sub_server" value:"" usage:"bkiam auth subserver" mapstructure:"bkiam_auth_sub_server"`
+	BKIamAuthHost       string          `json:"bkiam_auth_host" value:"" usage:"bkiam auth server host" mapstructure:"bkiam_auth_host"`
+	BKIamAuthAppCode    string          `json:"bkiam_auth_app_code" value:"" usage:"app code for communicating with auth" mapstructure:"bkiam_auth_app_code"`
+	BKIamAuthAppSecret  string          `json:"bkiam_auth_app_secret" value:"" usage:"app secret for communicating with auth" mapstructure:"bkiam_auth_app_secret"`
+	BKIamAuthSystemID   string          `json:"bkiam_auth_system_id" value:"" usage:"system id in auth service" mapstructure:"bkiam_auth_system_id"`
+	BKIamAuthScopeID    string          `json:"bkiam_auth_scope_id" value:"" usage:"scope id in auth service" mapstructure:"bkiam_auth_scope_id"`
+	BKIamZookeeper      string          `json:"bkiam_auth_zookeeper" value:"" usage:"zookeeper for auth token storage" mapstructure:"bkiam_auth_zookeeper"`
+	BKIamTokenWhiteList []AuthWhitelist `json:"bkiam_auth_token_whitelist" value:"" usage:"token whitelist for bkiam"`
+	BKIamAuthSubServer  string          `json:"bkiam_auth_sub_server" value:"" usage:"bkiam auth subserver" mapstructure:"bkiam_auth_sub_server"`
+}
+
+// AuthWhitelist white list for bkiam
+type AuthWhitelist struct {
+	Token string          `json:"token"`
+	Scope []AuthWLCluster `json:"scope"`
+}
+
+// AuthWLCluster cluster id & namespace for whitelist
+type AuthWLCluster struct {
+	ClusterID string   `json:"cluster_id"`
+	Namespace []string `json:"namespace"`
 }
 
 //NewServerOption create a ServerOption object
@@ -101,6 +135,7 @@ func NewServerOption() *ServerOption {
 	return &s
 }
 
+//Parse configuration item parsed
 func Parse(ops *ServerOption) error {
 	conf.Parse(ops)
 	return nil

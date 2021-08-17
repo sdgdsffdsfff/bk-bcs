@@ -14,12 +14,14 @@
 package schedcontext
 
 import (
-	//"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/apiserver"
-	"bk-bcs/bcs-common/common/http/httpserver"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/util"
+	//"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/apiserver"
+	"github.com/Tencent/bk-bcs/bcs-common/common/http/httpserver"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/remote/alertmanager"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/util"
 )
 
+// SchedContext context for scheduler
 type SchedContext struct {
 	Store store.Store
 
@@ -28,5 +30,8 @@ type SchedContext struct {
 	// for HTTPS
 	ApiServer2 *httpserver.HttpServer
 
+	// Config for scheduler config
 	Config util.SchedConfig
+	// AlertManager for alert interface
+	AlertManager alertmanager.AlertManageInterface
 }

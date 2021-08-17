@@ -14,8 +14,8 @@
 package healthcheck
 
 import (
-	"bk-bcs/bcs-mesos/bcs-container-executor/logs"
 	"fmt"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/logs"
 	"net"
 	"strconv"
 	"time"
@@ -76,7 +76,10 @@ func (check *TCPChecker) Start() {
 	check.Started = true
 	check.StartPoint = time.Now()
 	time.Sleep(time.Duration(int64(check.mechanism.GracePeriodSeconds)) * time.Second)
+	check.check()
+
 	tick := time.NewTicker(time.Duration(int64(check.mechanism.IntervalSeconds)) * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-check.cxt.Done():
@@ -86,23 +89,27 @@ func (check *TCPChecker) Start() {
 			if check.isPause {
 				continue
 			}
-			check.Ticks++
-			healthy := check.ReCheck()
-			/*notGrace := int(check.LastCheck.Unix()-check.StartPoint.Unix()) > check.mechanism.GracePeriodSeconds
-			if !healthy && notGrace {*/
-			if !healthy {
-				check.LastFailure = check.LastCheck
-				check.ConsecutiveFailures++
-				check.Healthy = false
-				logs.Infof("TCPChecker %s:%d become **Unhealthy**", check.ipaddr, check.port)
-				if check.notify != nil {
-					check.notify(check)
-				}
-			} else {
-				check.Healthy = true
-				check.ConsecutiveFailures = 0
-			}
+			check.check()
 		}
+	}
+}
+
+func (check *TCPChecker) check() {
+	check.Ticks++
+	healthy := check.ReCheck()
+	/*notGrace := int(check.LastCheck.Unix()-check.StartPoint.Unix()) > check.mechanism.GracePeriodSeconds
+	if !healthy && notGrace {*/
+	if !healthy {
+		check.LastFailure = check.LastCheck
+		check.ConsecutiveFailures++
+		check.Healthy = false
+		logs.Infof("TCPChecker %s:%d become **Unhealthy**", check.ipaddr, check.port)
+		if check.notify != nil {
+			check.notify(check)
+		}
+	} else {
+		check.Healthy = true
+		check.ConsecutiveFailures = 0
 	}
 }
 
@@ -136,7 +143,7 @@ func (check *TCPChecker) Resume() error {
 
 //Name get check name
 func (check *TCPChecker) Name() string {
-	return "tcp://" + check.ipaddr + ":" + strconv.Itoa(check.port)
+	return TcpHealthcheck
 }
 
 //Relation checker relative to container

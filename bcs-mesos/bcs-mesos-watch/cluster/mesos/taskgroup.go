@@ -14,21 +14,23 @@
 package mesos
 
 import (
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-common/pkg/cache"
-	"bk-bcs/bcs-mesos/bcs-mesos-watch/cluster"
-	"bk-bcs/bcs-mesos/bcs-mesos-watch/types"
-	"bk-bcs/bcs-mesos/bcs-mesos-watch/util"
-	schedulertypes "bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 	"encoding/json"
 	"fmt"
-	"github.com/samuel/go-zookeeper/zk"
-	"golang.org/x/net/context"
 	"path"
 	"reflect"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/samuel/go-zookeeper/zk"
+	"golang.org/x/net/context"
+
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/cache"
+	schedulertypes "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/cluster"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/types"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/util"
 )
 
 //TaskControlInfo store all app info under one namespace
@@ -129,6 +131,7 @@ func (task *TaskGroupWatch) pathWatch(cxt context.Context, path string) {
 
 	//watch children node event
 	tick := time.NewTicker(240 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-tick.C:
@@ -207,6 +210,7 @@ func (task *TaskGroupWatch) taskGroupNodeWatch(cxt context.Context, taskpath str
 
 	ID := path.Base(taskpath)
 	tick := time.NewTicker(240 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-tick.C:
@@ -318,10 +322,14 @@ func (task *TaskGroupWatch) AddEvent(obj interface{}) {
 	data := &types.BcsSyncData{
 		//DataType: "TaskGroup",
 		DataType: task.GetTaskGroupChannelV2(taskData),
-		Action:   "Add",
+		Action:   types.ActionAdd,
 		Item:     obj,
 	}
-	task.report.ReportData(data)
+	if err := task.report.ReportData(data); err != nil {
+		util.ReportSyncTotal(task.report.GetClusterID(), cluster.DataTypeTaskGroup, types.ActionAdd, cluster.SyncFailure)
+	} else {
+		util.ReportSyncTotal(task.report.GetClusterID(), cluster.DataTypeTaskGroup, types.ActionAdd, cluster.SyncSuccess)
+	}
 }
 
 //DeleteEvent when delete
@@ -337,10 +345,14 @@ func (task *TaskGroupWatch) DeleteEvent(obj interface{}) {
 	data := &types.BcsSyncData{
 		//DataType: "TaskGroup",
 		DataType: task.GetTaskGroupChannelV2(taskData),
-		Action:   "Delete",
+		Action:   types.ActionDelete,
 		Item:     obj,
 	}
-	task.report.ReportData(data)
+	if err := task.report.ReportData(data); err != nil {
+		util.ReportSyncTotal(task.report.GetClusterID(), cluster.DataTypeTaskGroup, types.ActionDelete, cluster.SyncFailure)
+	} else {
+		util.ReportSyncTotal(task.report.GetClusterID(), cluster.DataTypeTaskGroup, types.ActionDelete, cluster.SyncSuccess)
+	}
 }
 
 //UpdateEvent when update
@@ -359,18 +371,24 @@ func (task *TaskGroupWatch) UpdateEvent(old, cur interface{}, force bool) {
 	data := &types.BcsSyncData{
 		//DataType: "TaskGroup",
 		DataType: task.GetTaskGroupChannelV2(taskData),
-		Action:   "Update",
+		Action:   types.ActionUpdate,
 		Item:     cur,
 	}
-	task.report.ReportData(data)
+	if err := task.report.ReportData(data); err != nil {
+		util.ReportSyncTotal(task.report.GetClusterID(), cluster.DataTypeTaskGroup, types.ActionUpdate, cluster.SyncFailure)
+	} else {
+		util.ReportSyncTotal(task.report.GetClusterID(), cluster.DataTypeTaskGroup, types.ActionUpdate, cluster.SyncSuccess)
+	}
 }
 
+//GetTaskGroupChannel get taskgroup dispatch channel
 func (task *TaskGroupWatch) GetTaskGroupChannel(taskGroup *schedulertypes.TaskGroup) string {
 
 	return "TaskGroup_" + strconv.Itoa(int(taskGroup.InstanceID%100))
 
 }
 
+//GetTaskGroupChannelV2 get taskgroup dispatch channel
 func (task *TaskGroupWatch) GetTaskGroupChannelV2(taskGroup *schedulertypes.TaskGroup) string {
 
 	index := util.GetHashId(taskGroup.ID, TaskgroupThreadNum)

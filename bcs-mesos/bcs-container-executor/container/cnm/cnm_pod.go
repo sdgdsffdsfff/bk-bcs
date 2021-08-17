@@ -14,15 +14,18 @@
 package cnm
 
 import (
-	"bk-bcs/bcs-mesos/bcs-container-executor/container"
-	"bk-bcs/bcs-mesos/bcs-container-executor/logs"
-	"bk-bcs/bcs-mesos/bcs-container-executor/util"
 	"fmt"
 	"strconv"
 	"sync"
 	"time"
 
-	schedTypes "bk-bcs/bcs-mesos/bcs-scheduler/src/types"
+	"github.com/Tencent/bk-bcs/bcs-common/common/util"
+	schedTypes "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/container"
+	devicepluginmanager "github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/devicepluginmanager"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/extendedresource"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/healthcheck"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/logs"
 
 	"golang.org/x/net/context"
 )
@@ -38,12 +41,14 @@ const (
 )
 
 const (
+	// ContainerStatusAbnormal abnormal definition
 	ContainerStatusAbnormal = 1
 )
 
 //NewPod create CNIPod instance with container interaface and container info
 //CNM pod implementation is defferent with cni pod.
-func NewPod(operator container.Container, tasks []*container.BcsContainerTask, handler *container.PodEventHandler) container.Pod {
+func NewPod(operator container.Container, tasks []*container.BcsContainerTask,
+	handler *container.PodEventHandler, extendedResourceDriver *extendedresource.Driver) container.Pod {
 	if len(tasks) == 0 {
 		logs.Errorf("Create DockerPod error, Container tasks are 0")
 		return nil
@@ -65,6 +70,9 @@ func NewPod(operator container.Container, tasks []*container.BcsContainerTask, h
 		conClient:        operator,
 		conTasks:         taskMap,
 		runningContainer: make(map[string]*container.BcsContainerInfo),
+		resourceManager: devicepluginmanager.NewResourceManager(
+			devicepluginmanager.NewDevicePluginManager(),
+			extendedResourceDriver),
 	}
 	return pod
 }
@@ -87,6 +95,8 @@ type DockerPod struct {
 	conClient        container.Container                    //container operator interface
 	conTasks         map[string]*container.BcsContainerTask //task for running containers, key is taskID
 	runningContainer map[string]*container.BcsContainerInfo //running container Name list for monitor
+	//device plugin manager
+	resourceManager *devicepluginmanager.ResourceManager
 }
 
 //IsHealthy check pod is healthy
@@ -94,6 +104,7 @@ func (p *DockerPod) IsHealthy() bool {
 	return p.healthy
 }
 
+//GetContainerTasks get local container task
 func (p *DockerPod) GetContainerTasks() map[string]*container.BcsContainerTask {
 	return p.conTasks
 }
@@ -182,11 +193,52 @@ func (p *DockerPod) Init() error {
 
 	envHost := container.BcsKV{
 		Key:   "BCS_CONTAINER_IP",
-		Value: util.GetIPAddress()[0],
+		Value: util.GetIPAddress(),
 	}
 	p.netTask.Env = append(p.netTask.Env, envHost)
 	//assignment for environments
 	container.EnvOperCopy(p.netTask)
+
+	cleanExtendedResourceFunc := func() {
+		if p.netTask != nil {
+			for _, ex := range p.netTask.ExtendedResources {
+				if err := p.resourceManager.ReleaseExtendedResources(ex.Name, p.netTask.TaskId); err != nil {
+					// do not break
+					logs.Errorf("release extended resources %v failed, err %s", ex, err.Error())
+				}
+			}
+		}
+	}
+
+	var extendedErr error
+	//if task contains extended resources, need connect device plugin to allocate resources
+	for _, ex := range p.netTask.ExtendedResources {
+		logs.Infof("task %s contains extended resource %s, then allocate it", p.netTask.TaskId, ex.Name)
+		envs, err := p.resourceManager.ApplyExtendedResources(ex, p.netTask.TaskId)
+		if err != nil {
+			logs.Errorf("apply extended resource failed, err %s", err.Error())
+			extendedErr = err
+			break
+		}
+		logs.Infof("add env %v for task %s", envs, p.netTask.TaskId)
+
+		//append response docker envs to task.envs
+		for k, v := range envs {
+			kv := container.BcsKV{
+				Key:   k,
+				Value: v,
+			}
+			p.netTask.Env = append(p.netTask.Env, kv)
+		}
+	}
+	//if allocate extended resource failed, then return and exit
+	if extendedErr != nil {
+		logs.Errorf(extendedErr.Error())
+		p.status = container.PodStatus_FAILED
+		p.message = extendedErr.Error()
+		cleanExtendedResourceFunc()
+		return extendedErr
+	}
 
 	//fix(developerJim): all containers in pod can not create PortMappings separately,
 	// so we need to copy all PortMappings from other containers to Network
@@ -199,6 +251,7 @@ func (p *DockerPod) Init() error {
 		logs.Errorf("DockerPod init failed in Creating master container. err: %s\n", createErr.Error())
 		p.status = container.PodStatus_FAILED
 		p.message = createErr.Error()
+		cleanExtendedResourceFunc()
 		return createErr
 	}
 	p.netTask.RuntimeConf.Status = container.ContainerStatus_CREATED
@@ -215,6 +268,7 @@ func (p *DockerPod) Init() error {
 			p.netTask.RuntimeConf.Message = "container PreSetting failed: " + preErr.Error()
 			p.status = container.PodStatus_FAILED
 			p.message = preErr.Error()
+			cleanExtendedResourceFunc()
 			return preErr
 		}
 	}
@@ -226,6 +280,7 @@ func (p *DockerPod) Init() error {
 		p.message = err.Error()
 		p.netTask.RuntimeConf.Status = container.ContainerStatus_EXITED
 		p.netTask.RuntimeConf.Message = "container start failed: " + err.Error()
+		cleanExtendedResourceFunc()
 		return err
 	}
 	//todo(developerJim): is it useful to check status? or just waiting for containerMonitor
@@ -234,17 +289,19 @@ func (p *DockerPod) Init() error {
 		logs.Errorln("DockerPod init failed in inspecting master container, err: ", conErr.Error())
 		p.status = container.PodStatus_FAILED
 		p.message = conErr.Error()
+		cleanExtendedResourceFunc()
 		return conErr
 	}
 	if info.Status != container.ContainerStatus_RUNNING {
 		logs.Errorf("DockerPod init stage failed, inspectContainer %s, but %s needed\n", info.Status, container.ContainerStatus_RUNNING)
 		p.status = container.PodStatus_FAILED
 		p.message = "docker pod master container init failed"
+		cleanExtendedResourceFunc()
 		return fmt.Errorf("docker pod master container init failed")
 	}
 	p.cnmIPAddr = info.IPAddress
 	p.netTask.RuntimeConf.Message = "container is starting"
-	p.netTask.RuntimeConf.NodeAddress = util.GetIPAddress()[0]
+	p.netTask.RuntimeConf.NodeAddress = util.GetIPAddress()
 	p.netTask.RuntimeConf.IPAddress = info.IPAddress
 	p.netTask.RuntimeConf.NetworkMode = info.NetworkMode
 	p.runningContainer[p.netTask.RuntimeConf.Name] = p.netTask.RuntimeConf
@@ -255,6 +312,22 @@ func (p *DockerPod) Init() error {
 //Finit dockerpod finit, nothing to be release.
 //keep it empty
 func (p *DockerPod) Finit() error {
+	for _, task := range p.conTasks {
+		for _, ex := range task.ExtendedResources {
+			if err := p.resourceManager.ReleaseExtendedResources(ex.Name, task.TaskId); err != nil {
+				// do not break
+				logs.Errorf("release extended resources %v failed, err %s", ex, err.Error())
+			}
+		}
+	}
+	if p.netTask != nil {
+		for _, ex := range p.netTask.ExtendedResources {
+			if err := p.resourceManager.ReleaseExtendedResources(ex.Name, p.netTask.TaskId); err != nil {
+				// do not break
+				logs.Errorf("release extended resources %v failed, err %s", ex, err.Error())
+			}
+		}
+	}
 	return nil
 }
 
@@ -265,7 +338,7 @@ func (p *DockerPod) Start() error {
 	//add pod ipaddr to ENV
 	envHost := container.BcsKV{
 		Key:   "BCS_CONTAINER_IP",
-		Value: util.GetIPAddress()[0],
+		Value: util.GetIPAddress(),
 	}
 
 	logs.Infof("docker pod start container...")
@@ -279,6 +352,36 @@ func (p *DockerPod) Start() error {
 		task.Env = append(task.Env, envHost)
 		//assignment for environments
 		container.EnvOperCopy(task)
+		var extendedErr error
+		//if task contains extended resources, need connect device plugin to allocate resources
+		for _, ex := range task.ExtendedResources {
+			logs.Infof("task %s contains extended resource %s, then allocate it", task.TaskId, ex.Name)
+			envs, err := p.resourceManager.ApplyExtendedResources(ex, p.netTask.TaskId)
+			if err != nil {
+				logs.Errorf("apply extended resource failed, err %s", err.Error())
+				extendedErr = err
+				break
+			}
+			logs.Infof("add env %v for task %s", envs, task.TaskId)
+
+			//append response docker envs to task.envs
+			for k, v := range envs {
+				kv := container.BcsKV{
+					Key:   k,
+					Value: v,
+				}
+				task.Env = append(task.Env, kv)
+			}
+		}
+
+		//if allocate extended resource failed, then return and exit
+		if extendedErr != nil {
+			logs.Errorf(extendedErr.Error())
+			task.RuntimeConf.Status = container.ContainerStatus_EXITED
+			task.RuntimeConf.Message = extendedErr.Error()
+			p.startFailedStop(extendedErr)
+			return extendedErr
+		}
 		createdInst, createErr := p.conClient.CreateContainer(name, task)
 		if createErr != nil {
 			logs.Errorf("DockerPod create %s with name %s failed, err: %s\n", task.Image, name, createErr.Error())
@@ -288,7 +391,7 @@ func (p *DockerPod) Start() error {
 			return createErr
 		}
 		task.RuntimeConf.ID = createdInst.ID
-		task.RuntimeConf.NodeAddress = util.GetIPAddress()[0]
+		task.RuntimeConf.NodeAddress = util.GetIPAddress()
 		task.RuntimeConf.IPAddress = p.cnmIPAddr
 		task.RuntimeConf.Status = container.ContainerStatus_CREATED
 		task.RuntimeConf.Message = "container created"
@@ -460,26 +563,16 @@ func (p *DockerPod) runningFailedStop(err error) {
 			task.HealthCheck.Stop()
 		}
 		p.conClient.StopContainer(name, task.KillPolicy)
-		if task.AutoRemove {
+		/*if task.AutoRemove {
 			p.conClient.RemoveContainer(name, true)
-		}
+		}*/
 		task.RuntimeConf.Status = container.ContainerStatus_EXITED
-
-		if p.exitCode == 0 {
-			task.RuntimeConf.Message = fmt.Sprintf("container exit because other container finished in pod")
-		} else {
-			task.RuntimeConf.Message = fmt.Sprintf("container exit because other container exited in pod")
-		}
+		task.RuntimeConf.Message = fmt.Sprintf("container exit because other container exited in pod")
 
 		delete(p.runningContainer, name)
 	}
 
-	if p.exitCode == 0 {
-		p.status = container.PodStatus_FINISH
-	} else {
-		p.status = container.PodStatus_FAILED
-	}
-
+	p.status = container.PodStatus_FAILED
 	p.message = err.Error()
 	logs.Infoln("DockerPod runningFailed stop end.")
 }
@@ -491,15 +584,9 @@ func (p *DockerPod) containersWatch(cxt context.Context) {
 		logs.Errorf("DockerPod status Error, request %s, but got %s, DockerPod Container watch exit\n", container.PodStatus_STARTING, p.status)
 		return
 	}
-	defer func() {
-		if err := recover(); err != nil {
-			logs.Infof("CNMPod panic:\n\n%+v", err)
-			p.runningFailedStop(fmt.Errorf("CNMPod failed because panic"))
-			return
-		}
-	}()
 
 	tick := time.NewTicker(defaultPodWatchInterval * time.Second)
+	defer tick.Stop()
 	//total := defaultErrTolerate * len(p.runningContainer)
 	for {
 		select {
@@ -521,17 +608,16 @@ func (p *DockerPod) containerCheck() error {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
-	//logs.Infof("start check container...")
-
 	for name := range p.runningContainer {
 		info, err := p.conClient.InspectContainer(name)
-		info.Healthy = true
 		if err != nil {
 			//todo(developerJim): inspect error, how to handle ?
 			tolerance++
 			logs.Errorf("DockerPod Inspect info from container runtime Err: %s, #########wait for next tick, tolerance: %d#########\n", err.Error(), tolerance)
 			continue
 		}
+
+		info.Healthy = true
 		//logs.Infof("DEBUG %+v\n", info)
 		if p.cnmIPAddr == "" && info.IPAddress != "" {
 			//setting cnm ip address again if get nothing in Init Stage
@@ -553,7 +639,12 @@ func (p *DockerPod) containerCheck() error {
 				if task.HealthCheck != nil && !task.HealthCheck.IsStarting() {
 					//health check starting when Status become RUNNING
 					logs.Infof("container [%s] is running, healthy status unkown, starting HealthyChecker, ip: %s\n", task.RuntimeConf.Name, p.cnmIPAddr)
-					task.HealthCheck.SetHost(p.cnmIPAddr)
+					if task.HealthCheck.Name() == healthcheck.CommandHealthcheck {
+						task.HealthCheck.SetHost(task.RuntimeConf.ID)
+					} else {
+						task.HealthCheck.SetHost(p.cnmIPAddr)
+					}
+
 					go task.HealthCheck.Start()
 				}
 				running++
@@ -572,12 +663,7 @@ func (p *DockerPod) containerCheck() error {
 				delete(p.runningContainer, name)
 
 				p.exitCode = task.RuntimeConf.ExitCode
-
-				if task.RuntimeConf.ExitCode == 0 {
-					task.RuntimeConf.Message = "container is finished"
-				} else {
-					task.RuntimeConf.Message = "container is down"
-				}
+				task.RuntimeConf.Message = "The container exits with an exception and you need to look at the business log location problem"
 
 				//stop running container
 				p.runningFailedStop(fmt.Errorf("Pod failed because %s", task.RuntimeConf.Message))
@@ -638,11 +724,13 @@ func (p *DockerPod) copyPortMappings() {
 	}
 }
 
+//GetNetArgs implementation
 func (p *DockerPod) GetNetArgs() [][2]string {
 	return nil
 }
 
-func (p *DockerPod) UpdateResources(id string, resource *schedTypes.Resource) error {
+//UpdateResources update CPU or MEM resource in runtime
+func (p *DockerPod) UpdateResources(id string, resource *schedTypes.TaskResources) error {
 	var exist bool
 	var conTask *container.BcsContainerTask
 
@@ -663,10 +751,12 @@ func (p *DockerPod) UpdateResources(id string, resource *schedTypes.Resource) er
 		return err
 	}
 
-	conTask.RuntimeConf.Resource = resource
+	conTask.RuntimeConf.Resource.Cpus = *resource.ReqCpu
+	conTask.RuntimeConf.Resource.Mem = *resource.ReqMem
 	return nil
 }
 
+// CommitImage image commit
 func (p *DockerPod) CommitImage(id, image string) error {
 	return p.conClient.CommitImage(id, image)
 }

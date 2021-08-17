@@ -40,9 +40,6 @@ type Cluster struct {
 	// Identifier is a random string, it can be used for apiserver proxy tunnel URL address concatenation
 	Identifier string    `json:"identifier" gorm:"size:128"`
 	CreatedAt  time.Time `json:"created_at"`
-	// TurnOnAdmin represents whether give an admin user to this cluster to avoid usertoken expired, this feature is
-	// primarily for webconsole
-	TurnOnAdmin bool `json:"turn_on_admin"`
 }
 
 type ClusterCredentials struct {
@@ -52,6 +49,7 @@ type ClusterCredentials struct {
 	ServerAddresses string `gorm:"size:2048"`
 	CaCertData      string `gorm:"size:4096"`
 	UserToken       string `gorm:"size:2048"`
+	ClusterDomain   string `gorm:"size:2048"`
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }
@@ -70,4 +68,15 @@ type RegisterToken struct {
 	ClusterId string    `json:"cluster_id" gorm:"unique;not null"`
 	Token     string    `json:"token" gorm:"size:256"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type WsClusterCredentials struct {
+	ID            uint   `gorm:"primary_key"`
+	ServerKey     string `gorm:"unique;not null"`
+	ClientModule  string `gorm:"not null"`
+	ServerAddress string `gorm:"size:2048"`
+	CaCertData    string `gorm:"size:4096"`
+	UserToken     string `gorm:"size:2048"`
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }

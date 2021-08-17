@@ -14,9 +14,9 @@
 package backend
 
 import (
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
 	"strconv"
 	"strings"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 )
 
 //TaskSorter bia name of []TaskGroup

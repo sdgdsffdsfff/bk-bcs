@@ -14,12 +14,13 @@
 package v4http
 
 import (
-	"bk-bcs/bcs-common/common"
-	"bk-bcs/bcs-common/common/blog"
-	bhttp "bk-bcs/bcs-common/common/http"
-	bcstype "bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/common"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	bhttp "github.com/Tencent/bk-bcs/bcs-common/common/http"
+	bcstype "github.com/Tencent/bk-bcs/bcs-common/common/types"
 )
 
+//ScaleApplication scale application transparent forwarding
 func (s *Scheduler) ScaleApplication(ns, name, instances string, kind bcstype.BcsDataType) (string, error) {
 	blog.Info("scale application (%s.%s) instances (%s)", ns, name, instances)
 

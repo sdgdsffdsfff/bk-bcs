@@ -14,22 +14,18 @@
 package scheduler
 
 import (
-	alarm "bk-bcs/bcs-common/common/bcs-health/api"
-	"bk-bcs/bcs-common/common/blog"
-	commtypes "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-common/common/zkclient"
-	"bk-bcs/bcs-common/pkg/cache"
-	"bk-bcs/bcs-mesos/bcs-container-executor/container"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 	"encoding/json"
 	"fmt"
-	"github.com/samuel/go-zookeeper/zk"
 	"reflect"
-	"strings"
 	"time"
+
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	commtypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/cache"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
 )
 
-// Event for service manager
+// ServiceSyncData Event for service manager
 type ServiceSyncData struct {
 	// TaskGroup, Service
 	DataType string
@@ -55,19 +51,7 @@ type exportServiceInfo struct {
 	syncTime   int64
 }
 
-type zkClient interface {
-	ConnectEx(sessionTimeOut time.Duration) error
-	GetEx(path string) ([]byte, *zk.Stat, error)
-	GetW(path string) ([]byte, *zk.Stat, <-chan zk.Event, error)
-	GetChildrenEx(path string) ([]string, *zk.Stat, error)
-	ChildrenW(path string) ([]string, *zk.Stat, <-chan zk.Event, error)
-	ExistEx(path string) (bool, *zk.Stat, error)
-	//ExistsW(path string) (bool, *zk.Stat, <-chan zk.Event, error)
-	State() zk.State
-	Close()
-}
-
-// Control message for service manager
+// ServiceMgrMsg Control message for service manager
 type ServiceMgrMsg struct {
 	// open:  work
 	// close:  not work
@@ -75,38 +59,29 @@ type ServiceMgrMsg struct {
 	MsgType string
 }
 
-// Service Manager
+// ServiceMgr Service Manager
 type ServiceMgr struct {
 	esInfoCache cache.Store
 	queue       chan *ServiceSyncData
-	zklink      string
-	client      zkClient
-	watchPath   string
 	sched       *Scheduler
 	msgQueue    chan *ServiceMgrMsg
 	isWork      bool
 }
 
-// Create service manager
-func NewServiceMgr(zkLink string, path string, scheduler *Scheduler) *ServiceMgr {
+// NewServiceMgr Create service manager
+func NewServiceMgr(scheduler *Scheduler) *ServiceMgr {
 	mgr := &ServiceMgr{
 		esInfoCache: cache.NewCache(esInfoKeyFunc),
 		queue:       make(chan *ServiceSyncData, 4096),
-		zklink:      zkLink,
-		watchPath:   path,
 		sched:       scheduler,
 		msgQueue:    make(chan *ServiceMgrMsg, 128),
 		isWork:      false,
 	}
 
-	err := mgr.createZkConn()
-	if err != nil {
-		return nil
-	}
 	return mgr
 }
 
-// Send control message to service manager
+// SendMsg Send control message to service manager
 func (mgr *ServiceMgr) SendMsg(msg *ServiceMgrMsg) error {
 	blog.Info("ServiceMgr: send an msg to service manager")
 	select {
@@ -119,54 +94,7 @@ func (mgr *ServiceMgr) SendMsg(msg *ServiceMgrMsg) error {
 	return nil
 }
 
-func (mgr *ServiceMgr) createZkConn() error {
-
-	blog.Info("servicemgr create ZK connection(%s) ...", mgr.zklink)
-	servers := strings.Split(mgr.zklink, ",")
-	//var conErr error
-	//mgr.client, _, conErr = zk.Connect(servers, time.Second*5)
-	mgr.client = zkclient.NewZkClient(servers)
-	conErr := mgr.client.ConnectEx(time.Second * 5)
-	if conErr != nil {
-		blog.Error("bcs-scheduler connect zookeeper failed: %s", conErr.Error())
-		return conErr
-	}
-	blog.Info("connect zookeeper %s success! base mgr path: %s ", mgr.zklink, mgr.watchPath)
-	return nil
-}
-
-func (mgr *ServiceMgr) zkConnMonitor() {
-	state := mgr.client.State()
-	if state == zk.StateConnected {
-		blog.V(3).Infof("############ZK Connection status is connected#####")
-		return
-	}
-	if state == zk.StateHasSession {
-		blog.V(3).Infof("############ZK Connection status is hassession#####")
-		return
-	}
-	blog.Warn("zookeeper connection under %s", state.String())
-	mgr.client.Close()
-
-	tryTimes := 0
-	for {
-		tryTimes++
-		err := mgr.createZkConn()
-		if err != nil {
-			mgr.client.Close()
-			time.Sleep(3 * time.Second)
-		} else {
-			break
-		}
-
-		if tryTimes >= 20 {
-			mgr.sched.SendHealthMsg(alarm.WarnKind, "", err.Error(), "", nil)
-			tryTimes = 0
-		}
-	}
-}
-
-// Send taskgroup update event to servie manager
+// TaskgroupUpdate Send taskgroup update event to servie manager
 func (mgr *ServiceMgr) TaskgroupUpdate(taskgroup *types.TaskGroup) {
 	data := &ServiceSyncData{
 		DataType: "TaskGroup",
@@ -177,7 +105,7 @@ func (mgr *ServiceMgr) TaskgroupUpdate(taskgroup *types.TaskGroup) {
 	return
 }
 
-// Send taskgroup add event to servie manager
+// TaskgroupAdd Send taskgroup add event to servie manager
 func (mgr *ServiceMgr) TaskgroupAdd(taskgroup *types.TaskGroup) {
 	data := &ServiceSyncData{
 		DataType: "TaskGroup",
@@ -188,7 +116,7 @@ func (mgr *ServiceMgr) TaskgroupAdd(taskgroup *types.TaskGroup) {
 	return
 }
 
-// Send taskgroup delete event to servie manager
+// TaskgroupDelete Send taskgroup delete event to servie manager
 func (mgr *ServiceMgr) TaskgroupDelete(taskgroup *types.TaskGroup) {
 	data := &ServiceSyncData{
 		DataType: "TaskGroup",
@@ -199,7 +127,7 @@ func (mgr *ServiceMgr) TaskgroupDelete(taskgroup *types.TaskGroup) {
 	return
 }
 
-// Send service updat event to servie manager
+// ServiceUpdate Send service updat event to servie manager
 func (mgr *ServiceMgr) ServiceUpdate(service *commtypes.BcsService) {
 	data := &ServiceSyncData{
 		DataType: "Service",
@@ -210,7 +138,7 @@ func (mgr *ServiceMgr) ServiceUpdate(service *commtypes.BcsService) {
 	return
 }
 
-// Send service add event to servie manager
+// ServiceAdd Send service add event to servie manager
 func (mgr *ServiceMgr) ServiceAdd(service *commtypes.BcsService) {
 	data := &ServiceSyncData{
 		DataType: "Service",
@@ -221,7 +149,7 @@ func (mgr *ServiceMgr) ServiceAdd(service *commtypes.BcsService) {
 	return
 }
 
-// Send service delete event to servie manager
+// ServiceDelete Send service delete event to servie manager
 func (mgr *ServiceMgr) ServiceDelete(service *commtypes.BcsService) {
 	data := &ServiceSyncData{
 		DataType: "Service",
@@ -239,11 +167,12 @@ func (mgr *ServiceMgr) postData(data *ServiceSyncData) {
 	mgr.queue <- data
 }
 
-// The goroutine function for service monitoring
+// Worker The goroutine function for service monitoring
 // This function will process events of taskgrou add, delete and update
 // This function will process events of service add, delete and update
 func (mgr *ServiceMgr) Worker() {
 	tick := time.NewTicker(300 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case req := <-mgr.msgQueue:
@@ -260,7 +189,6 @@ func (mgr *ServiceMgr) Worker() {
 				return
 			}
 		case <-tick.C:
-			mgr.zkConnMonitor()
 			blog.V(3).Infof("ServiceMgr is running, managed service num: %d", mgr.esInfoCache.Num())
 			if mgr.isWork == false {
 				continue
@@ -269,7 +197,8 @@ func (mgr *ServiceMgr) Worker() {
 			mgr.doCheck()
 
 		case data := <-mgr.queue:
-			blog.V(3).Infof("ServiceMgr: receive data: %s, current queue(%d/%d)", data.DataType, len(mgr.queue), cap(mgr.queue))
+			blog.V(3).Infof("ServiceMgr: receive data: %s, current queue(%d/%d)",
+				data.DataType, len(mgr.queue), cap(mgr.queue))
 			if mgr.isWork == false {
 				continue
 			}
@@ -293,7 +222,7 @@ func (mgr *ServiceMgr) Worker() {
 					mgr.updateService(data.Item.(*commtypes.BcsService), currTime)
 				}
 			} else {
-				blog.Warn("ServiceMgr recieve unknown data action(type:%s, action:%s)", data.DataType, data.Action)
+				blog.Warn("ServiceMgr receive unknown data action(type:%s, action:%s)", data.DataType, data.Action)
 			}
 		}
 	}
@@ -332,80 +261,42 @@ func (mgr *ServiceMgr) doCheck() {
 
 func (mgr *ServiceMgr) processAllServices() error {
 	currTime := time.Now().Unix()
-	basePath := mgr.watchPath + "/service"
-	blog.Info("sync all services under(%s), currTime(%d)", basePath, currTime)
+	blog.Info("sync all services, currTime(%d)", currTime)
 
-	nmList, _, err := mgr.client.GetChildrenEx(basePath)
+	services, err := mgr.sched.store.ListAllServices()
 	if err != nil {
-		blog.Error("get path(%s) children err: %s", basePath, err.Error())
+		blog.Infof("ServiceMgr ListAllServices error %s", err.Error())
 		return err
 	}
-	if len(nmList) == 0 {
-		blog.Warn("get empty namespace list under path(%s)", basePath)
-		return nil
-	}
 
-	// sync all services from zk and update cache, create add and update events
-	numZk := 0
-	numDel := 0
-	for _, nmNode := range nmList {
-		blog.V(3).Infof("get namespace node(%s) under path(%s)", nmNode, basePath)
-		nmPath := basePath + "/" + nmNode
-		nodeList, _, err := mgr.client.GetChildrenEx(nmPath)
+	for _, data := range services {
+		key := data.ObjectMeta.NameSpace + "." + data.ObjectMeta.Name
+		cacheData, exist, err := mgr.esInfoCache.GetByKey(key)
 		if err != nil {
-			blog.Error("get children nodes under %s err: %s", nmPath, err.Error())
+			blog.Error("get service %s from cache return err:%s", key, err.Error())
 			continue
 		}
-		for _, oneNode := range nodeList {
-			numZk++
-			blog.V(3).Infof("get node(%s) under path(%s)", oneNode, nmPath)
-			nodePath := nmPath + "/" + oneNode
-			byteData, _, err := mgr.client.GetEx(nodePath)
-			if err != nil {
-				blog.Error("Get %s data err: %s", nodePath, err.Error())
+		if exist == true {
+			cacheDataInfo, ok := cacheData.(*exportServiceInfo)
+			if !ok {
+				blog.Error("convert cachedata to exportServiceInfo fail, key(%s)", key)
 				continue
 			}
-			data := new(commtypes.BcsService)
-			if jsonErr := json.Unmarshal(byteData, data); jsonErr != nil {
-				blog.Error("Parse %s json data(%s) Err: %s", nodePath, string(byteData), jsonErr.Error())
-				continue
-			}
-
-			key := data.ObjectMeta.NameSpace + "." + data.ObjectMeta.Name
-			cacheData, exist, err := mgr.esInfoCache.GetByKey(key)
-			if err != nil {
-				blog.Error("get service %s from cache return err:%s", key, err.Error())
-				continue
-			}
-			if exist == true {
-				cacheDataInfo, ok := cacheData.(*exportServiceInfo)
-				if !ok {
-					blog.Error("convert cachedata to exportServiceInfo fail, key(%s)", key)
-					continue
-				}
-				if !reflect.DeepEqual(cacheDataInfo.bcsService, data) {
-					blog.Warnf("service %s is changed, do update and init its endpoint", key)
-					mgr.updateService(data, currTime)
-				} else {
-					blog.V(3).Infof("service %s is not changed, update sync time(%d)", key, currTime)
-					cacheDataInfo.syncTime = currTime
-				}
+			if !reflect.DeepEqual(cacheDataInfo.bcsService, data) {
+				blog.Warnf("service %s is changed, do update and init its endpoint", key)
+				mgr.updateService(data, currTime)
 			} else {
-				blog.Info("service %s is not in cache, to do add, time(%d)", key, currTime)
-				mgr.addService(data, currTime)
-				//bcsEndpoint, _ := mgr.sched.store.FetchEndpoint(data.ObjectMeta.NameSpace, data.ObjectMeta.Name)
-				//if bcsEndpoint != nil {
-				//	blog.Info("service %s is already has endpoint data in ZK, add to cache", key)
-				//	mgr.addService(data, bcsEndpoint, currTime)
-				//} else {
-				//	blog.Info("service %s is has not endpoint data in ZK, create for it", key)
-				//	mgr.addService(data, nil, currTime)
-				//}
+				blog.V(3).Infof("service %s is not changed, update sync time(%d)", key, currTime)
+				cacheDataInfo.syncTime = currTime
 			}
+		} else {
+			blog.Info("service %s is not in cache, to do add, time(%d)", key, currTime)
+			mgr.addService(data, currTime)
 		}
 	}
 
 	// check cache, create delete events
+	numDel := 0
 	keyList := mgr.esInfoCache.ListKeys()
 	for _, key := range keyList {
 		blog.V(3).Infof("to check cache service %s", key)
@@ -431,7 +322,7 @@ func (mgr *ServiceMgr) processAllServices() error {
 		}
 	}
 
-	blog.Info("sync %d services from zk, delete %d cache services", numZk, numDel)
+	blog.Info("sync %d services from zk, delete %d cache services", len(services), numDel)
 	return nil
 }
 
@@ -440,11 +331,11 @@ func (mgr *ServiceMgr) addService(service *commtypes.BcsService, tNow int64) {
 		return
 	}
 	key := service.ObjectMeta.NameSpace + "." + service.ObjectMeta.Name
-	blog.Info("ServiceMgr recieve addService(%s, %+v)", key, service)
+	blog.Info("ServiceMgr receive addService(%s, %+v)", key, service)
 
 	_, exist, err := mgr.esInfoCache.GetByKey(key)
 	if err != nil {
-		blog.Error("when recieve addService event, get esInfo %s from cache return err:%s", key, err.Error())
+		blog.Error("when receive addService event, get esInfo %s from cache return err:%s", key, err.Error())
 	}
 	if exist == true {
 		blog.Warn("when receive addService event, esInfo %s is in already in cache, will be updated", key)
@@ -469,7 +360,7 @@ func (mgr *ServiceMgr) updateService(service *commtypes.BcsService, tNow int64) 
 		return
 	}
 	key := service.ObjectMeta.NameSpace + "." + service.ObjectMeta.Name
-	blog.Info("ServiceMgr recieve updateService(%s, %+v)", key, service)
+	blog.Info("ServiceMgr receive updateService(%s, %+v)", key, service)
 
 	createTime := tNow
 	cacheData, exist, err := mgr.esInfoCache.GetByKey(key)
@@ -507,7 +398,7 @@ func (mgr *ServiceMgr) deleteService(service *commtypes.BcsService) {
 		return
 	}
 	key := service.ObjectMeta.NameSpace + "." + service.ObjectMeta.Name
-	blog.Info("ServiceMgr recieve deleteService(%+v)", service)
+	blog.Info("ServiceMgr receive deleteService(%+v)", service)
 
 	cacheData, exist, err := mgr.esInfoCache.GetByKey(key)
 	if exist == false || err != nil {
@@ -545,68 +436,36 @@ func (mgr *ServiceMgr) createServiceInfo(service *commtypes.BcsService) *exportS
 	esInfo.endpoint.TypeMeta = service.TypeMeta
 	mgr.syncEndpointInfo(esInfo)
 
-
 	blog.Info("ServiceMgr: service(%s) endpoint created, endpoint len(%d) ", key, len(esInfo.endpoint.Endpoints))
 
 	return esInfo
 }
 
 func (mgr *ServiceMgr) syncEndpointInfo(esInfo *exportServiceInfo) {
-
 	key := esInfo.bcsService.ObjectMeta.NameSpace + "." + esInfo.bcsService.ObjectMeta.Name
-
-	basePath := fmt.Sprintf("%s/application/%s", mgr.watchPath, esInfo.bcsService.ObjectMeta.NameSpace)
-	blog.V(3).Infof("sync all taskgroups under(%s) for service(%s)", basePath, key)
-
-	appList, _, err := mgr.client.GetChildrenEx(basePath)
+	apps, err := mgr.sched.store.ListApplications(esInfo.bcsService.ObjectMeta.NameSpace)
 	if err != nil {
-		blog.Error("get path(%s) children err: %s", basePath, err.Error())
+		blog.Errorf("ServiceMgr list application(%s) error %s", esInfo.bcsService.ObjectMeta.NameSpace, err.Error())
 		return
 	}
 
 	esInfo.endpoint.Endpoints = nil
+	for _, application := range apps {
+		isFit := mgr.getApplicationServiceLabel(esInfo.bcsService, application)
+		if !isFit {
+			blog.V(3).Infof("application(%s:%s) not match service: %s", application.RunAs, application.ID, key)
+			continue
+		}
 
-	for _, app := range appList {
-		appPath := fmt.Sprintf("%s/%s", basePath, app)
-
-		by, _, err := mgr.client.GetEx(appPath)
+		blog.Infof("sync all taskgroups under application(%s:%s) for service(%s)",
+			application.RunAs, application.ID, key)
+		taskgroups, err := mgr.sched.store.ListTaskGroups(application.RunAs, application.ID)
 		if err != nil {
-			blog.Warnf("get application(%s) from zk error: %s", appPath, err.Error())
-			continue
-		}
-		var application *types.Application
-		err = json.Unmarshal(by, &application)
-		if err != nil {
-			blog.Warnf("json.Unmarshal application(%s) error: %s", appPath, err.Error())
-			continue
-		}
-		label := mgr.getApplicationServiceLabel(esInfo.bcsService, application)
-		if label == "" {
-			blog.V(3).Infof("application(%s) not match service: %s", appPath, key)
+			blog.Errorf("ServiceMgr List TaskGroups(%s:%s) error %s", application.RunAs, application.ID, err.Error())
 			continue
 		}
 
-		blog.Infof("sync all taskgroups under(%s) for service(%s)", appPath, key)
-		tgList, _, err := mgr.client.GetChildrenEx(appPath)
-		if err != nil {
-			blog.Error("get path(%s) children err: %s", appPath, err.Error())
-			continue
-		}
-
-		for _, tg := range tgList {
-			tgPath := fmt.Sprintf("%s/%s", appPath, tg)
-			by, _, err := mgr.client.GetEx(tgPath)
-			if err != nil {
-				blog.Errorf("get zk path %s error %s", tgPath, err.Error())
-				continue
-			}
-
-			tskgroup := new(types.TaskGroup)
-			err = json.Unmarshal(by, tskgroup)
-			if err != nil {
-				blog.Errorf("json.Unmarshal zk path %s data failed, error %s", tgPath, err.Error())
-				continue
-			}
+		for _, tskgroup := range taskgroups {
 			if tskgroup.Taskgroup == nil || len(tskgroup.Taskgroup) == 0 {
 				blog.Error("taskgroup(%s) has no Task Info", tskgroup.ID)
 				continue
@@ -616,13 +475,6 @@ func (mgr *ServiceMgr) syncEndpointInfo(esInfo *exportServiceInfo) {
 				continue
 			}
 
-			//label := mgr.getTaskGroupServiceLabel(esInfo.bcsService, tskgroup)
-			//if label == "" {
-			//	blog.V(3).Infof("taskgroup(%s) not match service(%s) ", tskgroup.ID, key)
-			//	continue
-			//}
-			//blog.V(3).Infof("taskgroup(%s) match service(%s)", tskgroup.ID, key)
-
 			podEndpoint := mgr.buildEndpoint(esInfo.bcsService, tskgroup)
 			if podEndpoint == nil {
 				blog.Error("build service(%s) endpoint(%s) return nil", key, tskgroup.ID)
@@ -631,7 +483,8 @@ func (mgr *ServiceMgr) syncEndpointInfo(esInfo *exportServiceInfo) {
 
 			changed := mgr.addEndPoint(esInfo.endpoint, podEndpoint)
 			if changed == true {
-				blog.Info("service(%s) and endpoint(%s), curr len(%d) ", key, tskgroup.ID, len(esInfo.endpoint.Endpoints))
+				blog.Info("service(%s) and endpoint(%s), curr len(%d) ",
+					key, tskgroup.ID, len(esInfo.endpoint.Endpoints))
 			}
 		}
 	}
@@ -639,48 +492,60 @@ func (mgr *ServiceMgr) syncEndpointInfo(esInfo *exportServiceInfo) {
 	return
 }
 
-func (mgr *ServiceMgr) getTaskGroupServiceLabel(service *commtypes.BcsService, tskgroup *types.TaskGroup) string {
+func (mgr *ServiceMgr) getTaskGroupServiceLabel(service *commtypes.BcsService, tskgroup *types.TaskGroup) bool {
 
 	if tskgroup.ObjectMeta.NameSpace != "" && service.ObjectMeta.NameSpace != tskgroup.ObjectMeta.NameSpace {
-		return ""
+		blog.V(3).Infof("namespace of service (%s.%s) and taskgroup (%s) is different",
+			service.NameSpace, service.Name, tskgroup.ID)
+		return false
 	}
-
+	//if task.labels==nil, then return false
+	task := tskgroup.Taskgroup[0]
+	if task.Labels == nil {
+		return false
+	}
 	key := service.ObjectMeta.NameSpace + "." + service.ObjectMeta.Name
 	for ks, vs := range service.Spec.Selector {
-		task := tskgroup.Taskgroup[0]
-		if task.Labels == nil {
-			return ""
+		vt, ok := task.Labels[ks]
+		if !ok {
+			blog.V(3).Infof("taskgroup label not match service: taskgroup(%s) label(%s:%s) service(%s)",
+				tskgroup.ID, ks, vs, key)
+			return false
 		}
-		for kt, vt := range task.Labels {
-			//blog.V(3).Infof("check task(%s) label(%s:%s) with selector label(%s:%s)", task.Name, kt, vt, ks, vs)
-			if ks == kt && vs == vt {
-				blog.V(3).Infof("task label match service: task(%s) label(%s:%s) service(%s)", task.Name, kt, vt, key)
-				return vt
-			}
+		if vs != vt {
+			blog.V(3).Infof("taskgroup label not match service: taskgroup(%s) label(%s:%s) service(%s)",
+				tskgroup.ID, ks, vs, key)
+			return false
 		}
 	}
-	return ""
+	blog.V(3).Infof("tskgroup label match service: task(%s) service(%s)", tskgroup.Name, key)
+	return true
 }
 
-func (mgr *ServiceMgr) getApplicationServiceLabel(service *commtypes.BcsService, app *types.Application) string {
+func (mgr *ServiceMgr) getApplicationServiceLabel(service *commtypes.BcsService, app *types.Application) bool {
 	if service.ObjectMeta.NameSpace != app.ObjectMeta.NameSpace {
 		blog.V(3).Infof("namespace of service (%s.%s) and application (%s.%s) is different",
 			service.NameSpace, service.Name, app.ObjectMeta.NameSpace, app.ID)
-		return ""
+		return false
 	}
 
 	key := service.ObjectMeta.NameSpace + "." + service.ObjectMeta.Name
 	for ks, vs := range service.Spec.Selector {
-
-		for kt, vt := range app.ObjectMeta.Labels {
-			if ks == kt && vs == vt {
-				blog.V(3).Infof("application label match service: application(%s.%s) label(%s:%s) service(%s)",
-					app.RunAs, app.ID, kt, vt, key)
-				return vt
-			}
+		vt, ok := app.ObjectMeta.Labels[ks]
+		if !ok {
+			blog.V(3).Infof("application label not match service: application(%s.%s) label(%s:%s) service(%s)",
+				app.RunAs, app.ID, ks, vs, key)
+			return false
+		}
+		if vs != vt {
+			blog.V(3).Infof("application label not match service: application(%s.%s) label(%s:%s) service(%s)",
+				app.RunAs, app.ID, ks, vs, key)
+			return false
 		}
 	}
-	return ""
+	blog.V(3).Infof("application label match service: application(%s.%s) service(%s)",
+		app.RunAs, app.ID, key)
+	return true
 }
 
 func (mgr *ServiceMgr) buildEndpoint(service *commtypes.BcsService, tskgroup *types.TaskGroup) *commtypes.Endpoint {
@@ -691,7 +556,7 @@ func (mgr *ServiceMgr) buildEndpoint(service *commtypes.BcsService, tskgroup *ty
 	podEndpoint.Target.ID = tskgroup.ID
 	podEndpoint.Target.Name = tskgroup.Name
 	podEndpoint.Target.Namespace = tskgroup.RunAs
-	bcsInfo := new(container.BcsContainerInfo)
+	bcsInfo := new(types.BcsContainerInfo)
 	oneEndpointPort := new(commtypes.ContainerPort)
 	for _, oneTask := range tskgroup.Taskgroup {
 		//if oneTask.Status != types.TASK_STATUS_RUNNING {
@@ -699,7 +564,8 @@ func (mgr *ServiceMgr) buildEndpoint(service *commtypes.BcsService, tskgroup *ty
 		//	continue
 		//}
 
-		var nodeAddress string
+		//agent ip
+		nodeAddress := oneTask.AgentIPAddress
 		// added  20180815, process task do not have the statusData upload by executor, because process executor
 		// do not have the hostIP and port information. So we make NodeIP, ContainerIP, HostIP directly with AgentIPAddress
 		// which is got from offer
@@ -707,9 +573,9 @@ func (mgr *ServiceMgr) buildEndpoint(service *commtypes.BcsService, tskgroup *ty
 		switch oneTask.Kind {
 		case commtypes.BcsDataType_PROCESS:
 			podEndpoint.NetworkMode = oneTask.Network
-			podEndpoint.NodeIP = oneTask.AgentIPAddress
-			podEndpoint.ContainerIP = oneTask.AgentIPAddress
-			nodeAddress = oneTask.AgentIPAddress
+			podEndpoint.NodeIP = nodeAddress
+			podEndpoint.ContainerIP = nodeAddress
+			//nodeAddress = oneTask.AgentIPAddress
 		case commtypes.BcsDataType_APP, "":
 			if len(oneTask.StatusData) == 0 {
 				blog.Warn("ServiceMgr: buildEndpoint, but task %s StatusData is empty", oneTask.ID)
@@ -723,13 +589,11 @@ func (mgr *ServiceMgr) buildEndpoint(service *commtypes.BcsService, tskgroup *ty
 			}
 
 			podEndpoint.NetworkMode = oneTask.Network
-			if bcsInfo.NodeAddress != "" {
-				podEndpoint.NodeIP = bcsInfo.NodeAddress
-			}
+			podEndpoint.NodeIP = nodeAddress
 			if bcsInfo.IPAddress != "" {
 				podEndpoint.ContainerIP = bcsInfo.IPAddress
 			}
-			nodeAddress = bcsInfo.NodeAddress
+			//nodeAddress = bcsInfo.NodeAddress
 		default:
 			continue
 		}
@@ -759,14 +623,16 @@ func (mgr *ServiceMgr) addEndPoint(bcsEndpoint *commtypes.BcsEndpoint, endpoint 
 		if onePoint.Target.ID == endpoint.Target.ID && onePoint.Target.Namespace == endpoint.Target.Namespace {
 			if !reflect.DeepEqual(onePoint, *endpoint) {
 				blog.Info("ServiceMgr: endpoint(%s %s) for %s.%s changed, real update",
-					endpoint.Target.Namespace, endpoint.Target.ID, bcsEndpoint.ObjectMeta.NameSpace, bcsEndpoint.ObjectMeta.Name)
+					endpoint.Target.Namespace, endpoint.Target.ID,
+					bcsEndpoint.ObjectMeta.NameSpace, bcsEndpoint.ObjectMeta.Name)
 				bcsEndpoint.Endpoints = append(bcsEndpoint.Endpoints[:index], bcsEndpoint.Endpoints[index+1:]...)
 				bcsEndpoint.Endpoints = append(bcsEndpoint.Endpoints, *endpoint)
 				return true
 			}
-		
+
 			blog.V(3).Infof("ServiceMgr: endpoint(%s %s) for %s.%s not changed, ignore it",
-				endpoint.Target.Namespace, endpoint.Target.ID, bcsEndpoint.ObjectMeta.NameSpace, bcsEndpoint.ObjectMeta.Name)
+				endpoint.Target.Namespace, endpoint.Target.ID,
+				bcsEndpoint.ObjectMeta.NameSpace, bcsEndpoint.ObjectMeta.Name)
 			return false
 		}
 	}
@@ -781,7 +647,8 @@ func (mgr *ServiceMgr) deleteEndPoint(bcsEndpoint *commtypes.BcsEndpoint, endpoi
 	for index, oldPoint := range bcsEndpoint.Endpoints {
 		if oldPoint.Target.ID == endpoint.Target.ID && oldPoint.Target.Namespace == endpoint.Target.Namespace {
 			blog.Info("ServiceMgr: endpoint(%s %s) for %s.%s real delete",
-				oldPoint.Target.Namespace, oldPoint.Target.ID, bcsEndpoint.ObjectMeta.NameSpace, bcsEndpoint.ObjectMeta.Name)
+				oldPoint.Target.Namespace, oldPoint.Target.ID,
+				bcsEndpoint.ObjectMeta.NameSpace, bcsEndpoint.ObjectMeta.Name)
 			bcsEndpoint.Endpoints = append(bcsEndpoint.Endpoints[:index], bcsEndpoint.Endpoints[index+1:]...)
 			return true
 		}
@@ -789,11 +656,6 @@ func (mgr *ServiceMgr) deleteEndPoint(bcsEndpoint *commtypes.BcsEndpoint, endpoi
 
 	return false
 }
-
-
-
-
-
 
 func (mgr *ServiceMgr) addTaskGroup(tskgroup *types.TaskGroup) {
 	blog.Info("ServiceMgr receive taskgroup add event, %s: %s", tskgroup.ID, tskgroup.Status)
@@ -803,7 +665,8 @@ func (mgr *ServiceMgr) addTaskGroup(tskgroup *types.TaskGroup) {
 	}
 
 	if tskgroup.Status != types.TASKGROUP_STATUS_RUNNING && tskgroup.Status != types.TASKGROUP_STATUS_LOST {
-		blog.V(3).Infof("ServiceMgr receive taskgroup add event, TaskGroup %s status %s, do nothing ", tskgroup.ID, tskgroup.Status)
+		blog.V(3).Infof("ServiceMgr receive taskgroup add event, TaskGroup %s status %s, do nothing ",
+			tskgroup.ID, tskgroup.Status)
 		return
 	}
 
@@ -825,11 +688,11 @@ func (mgr *ServiceMgr) addTaskGroup(tskgroup *types.TaskGroup) {
 		}
 
 		// check matching of selector and task label
-		label := mgr.getTaskGroupServiceLabel(esInfo.bcsService, tskgroup)
-		if label == "" {
+		isFit := mgr.getTaskGroupServiceLabel(esInfo.bcsService, tskgroup)
+		if !isFit {
 			continue
 		}
-		blog.V(3).Infof("ServiceMgr: %s, match task label(%s:%s) ", key, tskgroup.ID, label)
+		blog.V(3).Infof("ServiceMgr: %s, match taskgroup %s fit ", key, tskgroup.ID)
 
 		podEndpoint := mgr.buildEndpoint(esInfo.bcsService, tskgroup)
 		if podEndpoint == nil {
@@ -875,11 +738,11 @@ func (mgr *ServiceMgr) updateTaskGroup(tskgroup *types.TaskGroup) {
 			continue
 		}
 		// check matching of selector and task label
-		label := mgr.getTaskGroupServiceLabel(esInfo.bcsService, tskgroup)
-		if label == "" {
+		isFit := mgr.getTaskGroupServiceLabel(esInfo.bcsService, tskgroup)
+		if !isFit {
 			continue
 		}
-		blog.V(3).Infof("ServiceMgr: %s, match task label(%s: %s) ", key, tskgroup.ID, label)
+		blog.V(3).Infof("ServiceMgr: %s, match taskgroup %s fit ", key, tskgroup.ID)
 
 		podEndpoint := mgr.buildEndpoint(esInfo.bcsService, tskgroup)
 		if podEndpoint == nil {
@@ -897,8 +760,8 @@ func (mgr *ServiceMgr) updateTaskGroup(tskgroup *types.TaskGroup) {
 		if changed == true {
 			blog.Info("ServiceMgr update taskgroup: service(%s) endpoint len(%d)", key, len(esInfo.endpoint.Endpoints))
 			mgr.sched.store.SaveEndpoint(esInfo.endpoint)
-		}
 
+		}
 
 	}
 
@@ -932,12 +795,12 @@ func (mgr *ServiceMgr) deleteTaskGroup(tskgroup *types.TaskGroup) {
 			continue
 		}
 		// check matching of selector and task label
-		label := mgr.getTaskGroupServiceLabel(esInfo.bcsService, tskgroup)
-		if label == "" {
+		isFit := mgr.getTaskGroupServiceLabel(esInfo.bcsService, tskgroup)
+		if !isFit {
 			continue
 		}
 
-		blog.V(3).Infof("ServiceMgr: %s, match task label(%s: %s) ", key, tskgroup.ID, label)
+		blog.V(3).Infof("ServiceMgr: %s, match taskgroup %s fit ", key, tskgroup.ID)
 
 		podEndpoint := mgr.buildEndpoint(esInfo.bcsService, tskgroup)
 		if podEndpoint == nil {

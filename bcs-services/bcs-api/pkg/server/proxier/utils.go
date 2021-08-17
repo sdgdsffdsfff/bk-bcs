@@ -14,17 +14,17 @@
 package proxier
 
 import (
-	"context"
 	"crypto/tls"
-	"net"
+	restclient "k8s.io/client-go/rest"
 	"net/url"
 	"strings"
-	"time"
 
-	restclient "k8s.io/client-go/rest"
-
-	m "bk-bcs/bcs-services/bcs-api/pkg/models"
 	"fmt"
+	m "github.com/Tencent/bk-bcs/bcs-services/bcs-api/pkg/models"
+)
+
+const (
+	bcsK8sClusterDomain = "kubernetes"
 )
 
 func ExtractIpAddress(serverAddress string) (*url.URL, error) {
@@ -39,29 +39,15 @@ func ExtractIpAddress(serverAddress string) (*url.URL, error) {
 }
 
 func TurnCredentialsIntoConfig(clusterCredentials *m.ClusterCredentials) (*restclient.Config, error) {
+
 	tlsClientConfig := restclient.TLSClientConfig{
-		CAData: []byte(clusterCredentials.CaCertData),
+		ServerName: bcsK8sClusterDomain,
+		CAData:     []byte(clusterCredentials.CaCertData),
 	}
-
-	dialer := &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 0 * time.Second,
-	}
-
-	ipAddress, err := ExtractIpAddress(clusterCredentials.ServerAddresses)
-	if err != nil {
-		return nil, err
-	}
-
 	return &restclient.Config{
 		Host:            clusterCredentials.ServerAddresses,
 		BearerToken:     clusterCredentials.UserToken,
 		TLSClientConfig: tlsClientConfig,
-		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// resolve domain to real apiserver address
-			addr = ipAddress.Host
-			return dialer.DialContext(ctx, network, addr)
-		},
 	}, nil
 }
 

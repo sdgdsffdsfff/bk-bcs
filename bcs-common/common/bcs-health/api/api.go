@@ -20,8 +20,8 @@ import (
 	"text/template"
 	"time"
 
-	"bk-bcs/bcs-common/common/bcs-health/types"
-	"bk-bcs/bcs-services/bcs-health/pkg/alarm/utils"
+	"github.com/Tencent/bk-bcs/bcs-common/common/bcs-health/types"
+	"github.com/Tencent/bk-bcs/bcs-common/common/bcs-health/utils"
 )
 
 // MessageKind type for message
@@ -65,6 +65,8 @@ type HealthInfo struct {
 	Message            string          `json:"message"`
 	Version            string          `json:"version"`
 	ReportTime         string          `json:"reporttime"`
+	ResourceType       string          `json:"resource_type"`
+	ResourceName       string          `json:"resource_name"`
 }
 
 var statusController *Status
@@ -134,6 +136,8 @@ func SendHealthInfo(health *HealthInfo) error {
 		ConvergenceSeconds: health.ConvergenceSeconds,
 		VoiceReadMsg:       voiceMsg,
 		AlarmMsg:           w.String(),
+		ResourceType:       health.ResourceType,
+		ResourceName:       health.ResourceName,
 
 		EventMessage:  health.Message,
 		ModuleVersion: health.Version,

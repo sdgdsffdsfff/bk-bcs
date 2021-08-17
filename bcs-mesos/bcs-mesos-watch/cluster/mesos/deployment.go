@@ -14,18 +14,21 @@
 package mesos
 
 import (
-	"bk-bcs/bcs-common/pkg/cache"
-	"bk-bcs/bcs-mesos/bcs-mesos-watch/cluster"
-	"bk-bcs/bcs-mesos/bcs-mesos-watch/types"
-	//schedulertypes "bk-bcs/bcs-mesos/bcs-scheduler/src/types"
-	"bk-bcs/bcs-common/common/blog"
-	schedulertypes "bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 	"encoding/json"
 	"fmt"
-	"golang.org/x/net/context"
 	"reflect"
+	"strconv"
 	"sync"
 	"time"
+
+	"golang.org/x/net/context"
+
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/cache"
+	schedulertypes "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/cluster"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/types"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/util"
 )
 
 //NSControlInfo store all app info under one namespace
@@ -35,12 +38,14 @@ import (
 //	cancel context.CancelFunc //for cancel sub goroutine
 //}
 
+//DeploymentInfo wrapper for BCS Deployment
 type DeploymentInfo struct {
 	data       *schedulertypes.Deployment
 	syncTime   int64
 	reportTime int64
 }
 
+//NewDeploymentWatch create deployment watch
 func NewDeploymentWatch(cxt context.Context, client ZkClient, reporter cluster.Reporter, watchPath string) *DeploymentWatch {
 
 	keyFunc := func(data interface{}) (string, error) {
@@ -70,6 +75,7 @@ func NewDeploymentWatch(cxt context.Context, client ZkClient, reporter cluster.R
 	}
 }
 
+//DeploymentWatch watch all deployment data and store to local cache
 type DeploymentWatch struct {
 	eventLock sync.Mutex       //lock for event
 	report    cluster.Reporter //reporter
@@ -80,9 +86,11 @@ type DeploymentWatch struct {
 	watchPath string
 }
 
+//Work to add path and node watch
 func (watch *DeploymentWatch) Work() {
 	watch.ProcessAllDeployments()
 	tick := time.NewTicker(10 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-watch.cancelCxt.Done():
@@ -95,6 +103,7 @@ func (watch *DeploymentWatch) Work() {
 	}
 }
 
+//ProcessAllDeployments handle all namespace deployment data
 func (watch *DeploymentWatch) ProcessAllDeployments() error {
 
 	currTime := time.Now().Unix()
@@ -223,11 +232,15 @@ func (watch *DeploymentWatch) AddEvent(obj interface{}) {
 	blog.Info("EVENT:: Add Event for Deployment %s.%s", deploymentData.ObjectMeta.NameSpace, deploymentData.ObjectMeta.Name)
 
 	data := &types.BcsSyncData{
-		DataType: "Deployment",
+		DataType: watch.GetDeploymentChannel(deploymentData),
 		Action:   "Add",
 		Item:     obj,
 	}
-	watch.report.ReportData(data)
+	if err := watch.report.ReportData(data); err != nil {
+		util.ReportSyncTotal(watch.report.GetClusterID(), cluster.DataTypeDeploy, types.ActionAdd, cluster.SyncFailure)
+	} else {
+		util.ReportSyncTotal(watch.report.GetClusterID(), cluster.DataTypeDeploy, types.ActionAdd, cluster.SyncSuccess)
+	}
 }
 
 //DeleteEvent when delete
@@ -240,11 +253,15 @@ func (watch *DeploymentWatch) DeleteEvent(obj interface{}) {
 	blog.Info("EVENT:: Delete Event for Deployment %s.%s", deploymentData.ObjectMeta.NameSpace, deploymentData.ObjectMeta.Name)
 	//report to cluster
 	data := &types.BcsSyncData{
-		DataType: "Deployment",
+		DataType: watch.GetDeploymentChannel(deploymentData),
 		Action:   "Delete",
 		Item:     obj,
 	}
-	watch.report.ReportData(data)
+	if err := watch.report.ReportData(data); err != nil {
+		util.ReportSyncTotal(watch.report.GetClusterID(), cluster.DataTypeDeploy, types.ActionDelete, cluster.SyncFailure)
+	} else {
+		util.ReportSyncTotal(watch.report.GetClusterID(), cluster.DataTypeDeploy, types.ActionDelete, cluster.SyncSuccess)
+	}
 }
 
 //UpdateEvent when update
@@ -259,9 +276,20 @@ func (watch *DeploymentWatch) UpdateEvent(old, cur interface{}) {
 
 	//report to cluster
 	data := &types.BcsSyncData{
-		DataType: "Deployment",
+		DataType: watch.GetDeploymentChannel(deploymentData),
 		Action:   "Update",
 		Item:     cur,
 	}
-	watch.report.ReportData(data)
+	if err := watch.report.ReportData(data); err != nil {
+		util.ReportSyncTotal(watch.report.GetClusterID(), cluster.DataTypeDeploy, types.ActionUpdate, cluster.SyncFailure)
+	} else {
+		util.ReportSyncTotal(watch.report.GetClusterID(), cluster.DataTypeDeploy, types.ActionUpdate, cluster.SyncSuccess)
+	}
+}
+
+// GetDeploymentChannel get channel by random algorithm
+func (watch *DeploymentWatch) GetDeploymentChannel(deployment *schedulertypes.Deployment) string {
+	index := util.GetHashId(deployment.ObjectMeta.Name, DeploymentThreadNum)
+
+	return types.DeploymentChannelPrefix + strconv.Itoa(index)
 }

@@ -14,8 +14,8 @@
 package store
 
 import (
-	commtypes "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/types"
+	commtypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
 )
 
 // The interface for object storage
@@ -46,11 +46,13 @@ type Store interface {
 	UnLockApplication(appID string)
 	// init lock pool
 	InitLockPool()
+	// list all applications
+	ListAllApplications() ([]*types.Application, error)
 
 	// save task to db
 	SaveTask(*types.Task) error
 	// list all tasks belong to a application by namespace and application name
-	ListTasks(string, string) ([]*types.Task, error)
+	//ListTasks(string, string) ([]*types.Task, error)
 	// fetch task from db
 	FetchTask(string) (*types.Task, error)
 	// delete task from db
@@ -68,20 +70,20 @@ type Store interface {
 	DeleteVersionNode(runAs, versionId string) error
 	// get version from db
 	GetVersion(runAs, appId string) (*types.Version, error)
+	//update version, current only migrate tool use it
+	UpdateVersion(version *types.Version) error
 
 	// save taskgroup to db
 	SaveTaskGroup(*types.TaskGroup) error
-	// list all taskgroup
+	// list taskgroups under namespace,appid
 	ListTaskGroups(string, string) ([]*types.TaskGroup, error)
 	// fetch taskgroup
 	FetchTaskGroup(string) (*types.TaskGroup, error)
 	FetchDBTaskGroup(string) (*types.TaskGroup, error)
 	// delete taskgroup by taskgroup id
 	DeleteTaskGroup(string) error
-	// delete taskgroup by appID
-	//DeleteApplicationTaskGroups(string, string) error
-	FetchTaskgroupByIndex(string, string, int) (*types.TaskGroup, error)
-	//GetApplicationRootPath() string
+	//list mesos cluster taskgroups, include: application、deployment、daemonset...
+	ListClusterTaskgroups() ([]*types.TaskGroup, error)
 
 	// save agent
 	SaveAgent(agent *types.Agent) error
@@ -91,6 +93,8 @@ type Store interface {
 	ListAgentNodes() ([]string, error)
 	// delete agent
 	DeleteAgent(key string) error
+	// list all agent
+	ListAllAgents() ([]*types.Agent, error)
 
 	// save agentsetting
 	SaveAgentSetting(*commtypes.BcsClusterAgentSetting) error
@@ -100,13 +104,17 @@ type Store interface {
 	DeleteAgentSetting(string) error
 	// list agentsetting
 	ListAgentSettingNodes() ([]string, error)
-
+	ListAgentsettings() ([]*commtypes.BcsClusterAgentSetting, error)
 	// save agentschedinfo
 	SaveAgentSchedInfo(*types.AgentSchedInfo) error
 	// fetch agentschedinfo
 	FetchAgentSchedInfo(string) (*types.AgentSchedInfo, error)
 	// delete agentschedinfo
 	DeleteAgentSchedInfo(string) error
+	// list agentschedinfo node
+	ListAgentSchedInfoNodes() ([]string, error)
+	// list agentschedinfo
+	ListAgentSchedInfo() ([]*types.AgentSchedInfo, error)
 
 	// save configmap
 	SaveConfigMap(configmap *commtypes.BcsConfigMap) error
@@ -114,6 +122,10 @@ type Store interface {
 	FetchConfigMap(ns, name string) (*commtypes.BcsConfigMap, error)
 	// delete configmap
 	DeleteConfigMap(ns, name string) error
+	// list ns configmap
+	//ListConfigmaps(runAs string) ([]*commtypes.BcsConfigMap, error)
+	// list all configmap
+	ListAllConfigmaps() ([]*commtypes.BcsConfigMap, error)
 
 	// save secret
 	SaveSecret(secret *commtypes.BcsSecret) error
@@ -121,6 +133,10 @@ type Store interface {
 	FetchSecret(ns, name string) (*commtypes.BcsSecret, error)
 	// delete secret
 	DeleteSecret(ns, name string) error
+	// list ns secret
+	//ListSecrets(runAs string) ([]*commtypes.BcsSecret, error)
+	// list all secret
+	ListAllSecrets() ([]*commtypes.BcsSecret, error)
 
 	// save service
 	SaveService(service *commtypes.BcsService) error
@@ -128,6 +144,10 @@ type Store interface {
 	FetchService(ns, name string) (*commtypes.BcsService, error)
 	// delete service
 	DeleteService(ns, name string) error
+	// list service by namespace
+	//ListServices(runAs string) ([]*commtypes.BcsService, error)
+	// list all services
+	ListAllServices() ([]*commtypes.BcsService, error)
 
 	// save endpoint
 	SaveEndpoint(endpoint *commtypes.BcsEndpoint) error
@@ -144,6 +164,8 @@ type Store interface {
 	ListDeployments(ns string) ([]*types.Deployment, error)
 	// delete deployment
 	DeleteDeployment(ns, name string) error
+	// list all deployment
+	ListAllDeployments() ([]*types.Deployment, error)
 
 	// init deployments lock pool
 	InitDeploymentLockPool()
@@ -171,6 +193,9 @@ type Store interface {
 	//fetch custom resource register list
 	ListCustomResourceRegister() ([]*commtypes.Crr, error)
 
+	//list all crds
+	ListAllCrds(kind string) ([]*commtypes.Crd, error)
+
 	//save custom resource definition
 	SaveCustomResourceDefinition(*commtypes.Crd) error
 
@@ -180,6 +205,12 @@ type Store interface {
 	//para3: name
 	DeleteCustomResourceDefinition(string, string, string) error
 
+	// init command lock
+	InitCmdLockPool()
+	//lock command by command_id
+	LockCommand(cmdId string)
+	//unlock command by command_id
+	UnLockCommand(cmdId string)
 	// save command
 	SaveCommand(command *commtypes.BcsCommandInfo) error
 	// fetch command
@@ -203,6 +234,35 @@ type Store interface {
 	DeleteAdmissionWebhook(ns, name string) error
 	FetchAllAdmissionWebhooks() ([]*commtypes.AdmissionWebhookConfiguration, error)
 	/*=========AdmissionWebhook==========*/
+
+	//list object namespaces, object = applicationNode、versionNode...
+	//ListObjectNamespaces(objectNode string) ([]string, error)
+
+	//start metrics
+	StartStoreObjectMetrics()
+	//stop metrics
+	StopStoreMetrics()
+	//fetch daemonset
+	FetchDaemonset(namespace, name string) (*types.BcsDaemonset, error)
+	//save daemonset
+	SaveDaemonset(daemon *types.BcsDaemonset) error
+	//List all daemonsets
+	ListAllDaemonset() ([]*types.BcsDaemonset, error)
+	//delete daemonset
+	DeleteDaemonset(namespace, name string) error
+	//list daemonset't taskgroup
+	ListDaemonsetTaskGroups(namespace, name string) ([]*types.TaskGroup, error)
+
+	// FetchTransaction fetch transaction
+	FetchTransaction(namespace, name string) (*types.Transaction, error)
+	// SaveTransaction save transaction
+	SaveTransaction(transaction *types.Transaction) error
+	// ListTransaction list transaction by namespace
+	ListTransaction(ns string) ([]*types.Transaction, error)
+	// ListAllTransaction list all transaction
+	ListAllTransaction() ([]*types.Transaction, error)
+	// DeleteTransaction delete transaction
+	DeleteTransaction(namespace, name string) error
 }
 
 // The interface for db operations

@@ -14,21 +14,23 @@
 package mesos
 
 import (
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-common/pkg/cache"
-	"bk-bcs/bcs-mesos/bcs-mesos-watch/cluster"
-	"bk-bcs/bcs-mesos/bcs-mesos-watch/types"
-	"bk-bcs/bcs-mesos/bcs-mesos-watch/util"
-	schedulertypes "bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 	"encoding/json"
 	"fmt"
-	"github.com/samuel/go-zookeeper/zk"
-	"golang.org/x/net/context"
 	"path"
 	"reflect"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/samuel/go-zookeeper/zk"
+	"golang.org/x/net/context"
+
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/cache"
+	schedulertypes "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/cluster"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/types"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/util"
 )
 
 //NSControlInfo store all app info under one namespace
@@ -36,6 +38,10 @@ type NSControlInfo struct {
 	path   string             //parent zk node, namespace absolute path
 	cxt    context.Context    //context for creating sub context
 	cancel context.CancelFunc //for cancel sub goroutine
+}
+
+func reportAppMetrics(clusterID, action, status string) {
+	util.ReportSyncTotal(clusterID, cluster.DataTypeApp, action, status)
 }
 
 //NewAppWatch return a new application watch
@@ -135,6 +141,7 @@ func (app *AppWatch) pathWatch(cxt context.Context, path string) {
 	app.handleAppList(cxt, path, children)
 
 	tick := time.NewTicker(240 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-tick.C:
@@ -217,6 +224,7 @@ func (app *AppWatch) appNodeWatch(cxt context.Context, apppath string, ns string
 	blog.V(3).Infof("appwatch wath app ID(%s)", ID)
 
 	tick := time.NewTicker(240 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-tick.C:
@@ -329,10 +337,14 @@ func (app *AppWatch) AddEvent(obj interface{}) {
 
 	data := &types.BcsSyncData{
 		DataType: app.GetApplicationChannel(appData),
-		Action:   "Add",
+		Action:   types.ActionAdd,
 		Item:     obj,
 	}
-	app.report.ReportData(data)
+	if err := app.report.ReportData(data); err != nil {
+		reportAppMetrics(app.report.GetClusterID(), types.ActionAdd, cluster.SyncFailure)
+	} else {
+		reportAppMetrics(app.report.GetClusterID(), types.ActionAdd, cluster.SyncSuccess)
+	}
 }
 
 //DeleteEvent when delete
@@ -347,10 +359,14 @@ func (app *AppWatch) DeleteEvent(obj interface{}) {
 	//report to cluster
 	data := &types.BcsSyncData{
 		DataType: app.GetApplicationChannel(appData),
-		Action:   "Delete",
+		Action:   types.ActionDelete,
 		Item:     obj,
 	}
-	app.report.ReportData(data)
+	if err := app.report.ReportData(data); err != nil {
+		reportAppMetrics(app.report.GetClusterID(), types.ActionDelete, cluster.SyncFailure)
+	} else {
+		reportAppMetrics(app.report.GetClusterID(), types.ActionDelete, cluster.SyncSuccess)
+	}
 }
 
 //UpdateEvent when update
@@ -370,12 +386,17 @@ func (app *AppWatch) UpdateEvent(old, cur interface{}, force bool) {
 	//report to cluster
 	data := &types.BcsSyncData{
 		DataType: app.GetApplicationChannel(appData),
-		Action:   "Update",
+		Action:   types.ActionUpdate,
 		Item:     cur,
 	}
-	app.report.ReportData(data)
+	if err := app.report.ReportData(data); err != nil {
+		reportAppMetrics(app.report.GetClusterID(), types.ActionUpdate, cluster.SyncFailure)
+	} else {
+		reportAppMetrics(app.report.GetClusterID(), types.ActionUpdate, cluster.SyncSuccess)
+	}
 }
 
+//GetApplicationChannel get distribution channel for Application
 func (app *AppWatch) GetApplicationChannel(application *schedulertypes.Application) string {
 	index := util.GetHashId(application.ID, ApplicationThreadNum)
 

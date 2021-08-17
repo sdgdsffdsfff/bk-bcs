@@ -14,15 +14,15 @@
 package app
 
 import (
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-mesos/bcs-mesos-driver/app/options"
-	"bk-bcs/bcs-mesos/bcs-mesos-driver/mesosdriver"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-driver/app/options"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-driver/mesosdriver"
 )
 
 //Run the mesos driver
 func Run(op *options.MesosDriverOption) error {
 
-	blog.Info("config: %v", op)
+	blog.Info("config: %+v", op)
 
 	setConfig(op)
 

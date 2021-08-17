@@ -16,8 +16,8 @@ package application
 import (
 	"fmt"
 
-	"bk-bcs/bcs-services/bcs-client/cmd/utils"
-	"bk-bcs/bcs-services/bcs-client/pkg/scheduler/v4"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/utils"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/pkg/scheduler/v4"
 
 	"github.com/urfave/cli"
 )
@@ -76,7 +76,7 @@ func rollBackApplication(c *utils.ClientContext) error {
 		return err
 	}
 
-	namespace, err := utils.ParseNamespaceFromJson(data)
+	namespace, err := utils.ParseNamespaceFromJSON(data)
 	if err != nil {
 		return err
 	}
@@ -101,7 +101,7 @@ func rollBackProcess(c *utils.ClientContext) error {
 		return err
 	}
 
-	namespace, err := utils.ParseNamespaceFromJson(data)
+	namespace, err := utils.ParseNamespaceFromJSON(data)
 	if err != nil {
 		return err
 	}

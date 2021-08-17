@@ -14,7 +14,7 @@
 package backend
 
 import (
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/types"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
 )
 
 func (b *backend) ListApplications(runAs string) ([]*types.Application, error) {
@@ -26,10 +26,6 @@ func (b *backend) ListApplicationTaskGroups(runAs, appId string) ([]*types.TaskG
 	defer b.store.UnLockApplication(runAs + "." + appId)
 
 	return b.store.ListTaskGroups(runAs, appId)
-}
-
-func (b *backend) ListApplicationTasks(runAs, appId string) ([]*types.Task, error) {
-	return b.store.ListTasks(runAs, appId)
 }
 
 // ListApplicationVersions is used to list all versions for application from db specified by application id.

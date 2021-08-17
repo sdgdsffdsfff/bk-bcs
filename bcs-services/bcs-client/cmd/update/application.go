@@ -17,8 +17,8 @@ import (
 	"fmt"
 	"net/url"
 
-	"bk-bcs/bcs-services/bcs-client/cmd/utils"
-	"bk-bcs/bcs-services/bcs-client/pkg/scheduler/v4"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/utils"
+	v4 "github.com/Tencent/bk-bcs/bcs-services/bcs-client/pkg/scheduler/v4"
 )
 
 func updateApplication(c *utils.ClientContext) error {
@@ -31,7 +31,7 @@ func updateApplication(c *utils.ClientContext) error {
 		return err
 	}
 
-	namespace, err := utils.ParseNamespaceFromJson(data)
+	namespace, err := utils.ParseNamespaceFromJSON(data)
 	if err != nil {
 		return err
 	}
@@ -41,8 +41,15 @@ func updateApplication(c *utils.ClientContext) error {
 		return fmt.Errorf("update application error: instances must be a positive number")
 	}
 
-	var extraValue url.Values
-	extraValue.Add("instances", fmt.Sprintf("%d", instances))
+	updateResFlag := c.Bool(utils.OptionOnlyUpdateResource)
+
+	extraValue := url.Values{}
+
+	if updateResFlag {
+		extraValue.Add("args", "resource")
+	} else {
+		extraValue.Add("instances", fmt.Sprintf("%d", instances))
+	}
 
 	scheduler := v4.NewBcsScheduler(utils.GetClientOption())
 	err = scheduler.UpdateApplication(c.ClusterID(), namespace, data, extraValue)

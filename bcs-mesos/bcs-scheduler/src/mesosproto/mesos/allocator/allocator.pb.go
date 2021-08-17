@@ -29,7 +29,7 @@ package mesos_allocator
 import proto "github.com/golang/protobuf/proto"
 import fmt "fmt"
 import math "math"
-import mesos "bk-bcs/bcs-mesos/bcs-scheduler/src/mesosproto/mesos"
+import mesos "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/mesosproto/mesos"
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal
@@ -86,7 +86,9 @@ func (x *InverseOfferStatus_Status) UnmarshalJSON(data []byte) error {
 	*x = InverseOfferStatus_Status(value)
 	return nil
 }
-func (InverseOfferStatus_Status) EnumDescriptor() ([]byte, []int) { return fileDescriptor0, []int{0, 0} }
+func (InverseOfferStatus_Status) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptor0, []int{0, 0}
+}
 
 // *
 // Describes the status of an inverse offer.

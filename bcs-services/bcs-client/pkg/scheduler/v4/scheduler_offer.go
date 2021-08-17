@@ -17,17 +17,18 @@ import (
 	"fmt"
 	"net/http"
 
-	"bk-bcs/bcs-common/common/codec"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/mesosproto/mesos"
+	"github.com/Tencent/bk-bcs/bcs-common/common/codec"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
 )
 
-func (bs *bcsScheduler) GetOffer(clusterID string) ([]*mesos.Offer, error) {
+// GetOffer get offer from scheduler
+func (bs *bcsScheduler) GetOffer(clusterID string) ([]*types.OfferWithDelta, error) {
 	return bs.getOffer(clusterID)
 }
 
-func (bs *bcsScheduler) getOffer(clusterID string) ([]*mesos.Offer, error) {
+func (bs *bcsScheduler) getOffer(clusterID string) ([]*types.OfferWithDelta, error) {
 	resp, err := bs.requester.Do(
-		fmt.Sprintf(BcsSchedulerOfferURI, bs.bcsApiAddress),
+		fmt.Sprintf(bcsSchedulerOfferURI, bs.bcsAPIAddress),
 		http.MethodGet,
 		nil,
 		getClusterIDHeader(clusterID),
@@ -46,7 +47,7 @@ func (bs *bcsScheduler) getOffer(clusterID string) ([]*mesos.Offer, error) {
 		return nil, fmt.Errorf("get offer failed: %s", msg)
 	}
 
-	var result []*mesos.Offer
+	var result []*types.OfferWithDelta
 	err = codec.DecJson(data, &result)
 	return result, err
 }

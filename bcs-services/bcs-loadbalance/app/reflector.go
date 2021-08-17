@@ -23,12 +23,12 @@ import (
 	"strings"
 	"time"
 
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-common/pkg/cache"
-	loadbalance "bk-bcs/bcs-common/pkg/loadbalance/v2"
-	"bk-bcs/bcs-services/bcs-loadbalance/option"
-	"bk-bcs/bcs-services/bcs-loadbalance/types"
-	"bk-bcs/bcs-services/bcs-loadbalance/util"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/cache"
+	loadbalance "github.com/Tencent/bk-bcs/bcs-common/pkg/loadbalance/v2"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-loadbalance/option"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-loadbalance/types"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-loadbalance/util"
 
 	"github.com/samuel/go-zookeeper/zk"
 )
@@ -161,7 +161,15 @@ func caculateBackendWeight(portInfo loadbalance.ExportPort, svr *loadbalance.Exp
 				backendCounts[backend.Label[0]] = value
 			}
 		} else {
-			blog.Warnf("Backend %s/%d in Service %s/%s with protocol %s/%d lost label info", backend.TargetIP, backend.TargetPort, svr.Namespace, svr.ServiceName, portInfo.Protocol, portInfo.ServicePort)
+			blog.Warnf(
+				"Backend %s/%d in Service %s/%s with protocol %s/%d lost label info",
+				backend.TargetIP,
+				backend.TargetPort,
+				svr.Namespace,
+				svr.ServiceName,
+				portInfo.Protocol,
+				portInfo.ServicePort,
+			)
 		}
 	}
 	//all backend weights
@@ -195,7 +203,11 @@ func convertPortBackends(portInfo loadbalance.ExportPort, svr *loadbalance.Expor
 		if svr.ServiceWeight != nil && bk.Label != nil && len(bk.Label) > 0 {
 			if value, ok := weightCopy[bk.Label[0]]; ok {
 				backend.Weight = value
+			} else {
+				backend.Weight = 1
 			}
+		} else {
+			backend.Weight = 1
 		}
 		backends = append(backends, backend)
 	}
@@ -219,23 +231,23 @@ func (reflector *ServiceReflector) listData(exportServiceList []*loadbalance.Exp
 		for _, portInfo := range svr.ServicePort {
 			//skip when no backends
 			if portInfo.Backends == nil || len(portInfo.Backends) == 0 || portInfo.ServicePort == 0 {
-				blog.Errorf("Get no backends in Service %s/%s in %s/%d", svr.Namespace, svr.ServiceName, portInfo.Protocol, portInfo.ServicePort)
+				blog.Warnf("Get no backends in Service %s/%s in %s/%d", svr.Namespace, svr.ServiceName, portInfo.Protocol, portInfo.ServicePort)
 				continue
 			}
 
 			backends := convertPortBackends(portInfo, svr)
 			//protect empty backend list
 			if len(backends) == 0 {
-				blog.Errorf("Reflector got no backend for %s/%s in service port %d, discard data", svr.Namespace, svr.ServiceName, portInfo.ServicePort)
+				blog.Warnf("Reflector got no backend for %s/%s in service port %d, discard data", svr.Namespace, svr.ServiceName, portInfo.ServicePort)
 				continue
 			}
 
 			var srvInfo types.ServiceInfo
 			validPath := util.TrimSpecialChar(portInfo.Path)
 			if validPath == "" {
-				srvInfo.Name = svr.ServiceName + "_" + portInfo.Name
+				srvInfo.Name = svr.ServiceName + "_" + strconv.Itoa(portInfo.ServicePort)
 			} else {
-				srvInfo.Name = svr.ServiceName + "_" + portInfo.Name + "_" + validPath
+				srvInfo.Name = svr.ServiceName + "_" + strconv.Itoa(portInfo.ServicePort) + "_" + validPath
 			}
 			srvInfo.ServicePort = portInfo.ServicePort
 			srvInfo.Balance = svr.Balance
@@ -298,6 +310,7 @@ func (reflector *ServiceReflector) listData(exportServiceList []*loadbalance.Exp
 func (reflector *ServiceReflector) Start() error {
 	//step1: zkInit, all zookeeper event setting
 	if err := reflector.zkInit(); err != nil {
+		LoadbalanceZookeeperStateMetric.WithLabelValues(reflector.cfg.Name).Set(0)
 		blog.Errorf("zookeeper init failed: %s", err.Error())
 		return err
 	}
@@ -368,12 +381,14 @@ func (reflector *ServiceReflector) watchClusterPath() error {
 func (reflector *ServiceReflector) listChildrenNode(node string) []string {
 	children, _, err := reflector.zkConn.Children(reflector.watchPath)
 	if err != nil {
+		LoadbalanceZookeeperStateMetric.WithLabelValues(reflector.cfg.Name).Set(0)
 		blog.Errorf("reflector get cluster path children error: %s", err.Error())
 		return nil
 	}
 	if len(children) == 0 {
 		blog.Infof("Get no service children node from cluster path: %s", reflector.watchPath)
 	}
+	LoadbalanceZookeeperStateMetric.WithLabelValues(reflector.cfg.Name).Set(1)
 	return children
 }
 
@@ -595,10 +610,12 @@ func (reflector *ServiceReflector) dataNodeWatch(node string) {
 //run run ticker for sync all data in zookeeper to local cache
 func (reflector *ServiceReflector) run() {
 	tick := time.NewTicker(time.Second * time.Duration(reflector.syncPeriod))
+	defer tick.Stop()
 	blog.Infof("Entry Ticker to sync total data")
 	for {
 		select {
 		case <-reflector.exit:
+			LoadbalanceZookeeperStateMetric.WithLabelValues(reflector.cfg.Name).Set(0)
 			blog.Infof("Ticker receive exit event.")
 			return
 		case <-tick.C:

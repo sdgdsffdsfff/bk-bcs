@@ -14,8 +14,8 @@
 package cnm
 
 import (
-	"bk-bcs/bcs-mesos/bcs-container-executor/container"
-	"bk-bcs/bcs-mesos/bcs-container-executor/network"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/container"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/network"
 )
 
 //NewNetManager interface for return DockerNetManager
@@ -23,8 +23,6 @@ func NewNetManager() network.NetManager {
 	manager := &DockerNetManager{}
 	return manager
 }
-
-//todo(developerJim): DockerNetManager can create Network namespace by driver
 
 //DockerNetManager docker network manager for using docker network
 type DockerNetManager struct {

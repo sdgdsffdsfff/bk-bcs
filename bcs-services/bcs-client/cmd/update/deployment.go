@@ -15,9 +15,10 @@ package update
 
 import (
 	"fmt"
+	"net/url"
 
-	"bk-bcs/bcs-services/bcs-client/cmd/utils"
-	"bk-bcs/bcs-services/bcs-client/pkg/scheduler/v4"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/utils"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/pkg/scheduler/v4"
 )
 
 func updateDeployment(c *utils.ClientContext) error {
@@ -30,13 +31,20 @@ func updateDeployment(c *utils.ClientContext) error {
 		return err
 	}
 
-	namespace, err := utils.ParseNamespaceFromJson(data)
+	namespace, err := utils.ParseNamespaceFromJSON(data)
 	if err != nil {
 		return err
 	}
 
+	updateResFlag := c.Bool(utils.OptionOnlyUpdateResource)
+	extraValue := url.Values{}
+
+	if updateResFlag {
+		extraValue.Add("args", "resource")
+	}
+
 	scheduler := v4.NewBcsScheduler(utils.GetClientOption())
-	err = scheduler.UpdateDeployment(c.ClusterID(), namespace, data, nil)
+	err = scheduler.UpdateDeployment(c.ClusterID(), namespace, data, extraValue)
 	if err != nil {
 		return fmt.Errorf("failed to update deployment: %v", err)
 	}

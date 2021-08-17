@@ -14,22 +14,30 @@
 package mesos
 
 import (
-	"bk-bcs/bcs-common/common/blog"
-	commtypes "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-common/pkg/cache"
-	lbtypes "bk-bcs/bcs-common/pkg/loadbalance/v2"
-	"bk-bcs/bcs-mesos/bcs-container-executor/container"
-	"bk-bcs/bcs-mesos/bcs-mesos-watch/cluster"
-	"bk-bcs/bcs-mesos/bcs-mesos-watch/types"
-	"bk-bcs/bcs-mesos/bcs-mesos-watch/util"
-	schedtypes "bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 	"encoding/json"
 	"fmt"
-	"golang.org/x/net/context"
 	"reflect"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/net/context"
+
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	commtypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/cache"
+	lbtypes "github.com/Tencent/bk-bcs/bcs-common/pkg/loadbalance/v2"
+	schedtypes "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-container-executor/container"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/cluster"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/types"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/util"
+)
+
+const (
+	networkHost    = "host"
+	networkBridge  = "bridge"
+	networkTypeCNM = "cnm"
 )
 
 //NewExportServiceWatch create export service watch
@@ -63,6 +71,7 @@ func esInfoKeyFunc(data interface{}) (string, error) {
 	return esInfo.bcsService.ObjectMeta.NameSpace + "." + esInfo.bcsService.ObjectMeta.Name, nil
 }
 
+//ExportServiceInfo wrapper for ServiceInfo
 type ExportServiceInfo struct {
 	bcsService    *commtypes.BcsService
 	exportService *lbtypes.ExportService
@@ -90,6 +99,7 @@ func (watch *ExportServiceWatch) postData(data *types.BcsSyncData) {
 
 func (watch *ExportServiceWatch) worker(cxt context.Context) {
 	tick := time.NewTicker(120 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-cxt.Done():
@@ -100,26 +110,26 @@ func (watch *ExportServiceWatch) worker(cxt context.Context) {
 		case data := <-watch.queue:
 			if data.DataType == "Service" {
 				switch data.Action {
-				case "Add":
+				case types.ActionAdd:
 					watch.addService(data.Item.(*commtypes.BcsService))
-				case "Delete":
+				case types.ActionDelete:
 					watch.deleteService(data.Item.(*commtypes.BcsService))
-				case "Update":
+				case types.ActionUpdate:
 					watch.updateService(data.Item.(*commtypes.BcsService))
 				}
 			} else {
 				splitType := strings.Split(data.DataType, "_")
 				if splitType[0] == "TaskGroup" {
 					switch data.Action {
-					case "Add":
+					case types.ActionAdd:
 						watch.addTaskGroup(data.Item.(*schedtypes.TaskGroup))
-					case "Delete":
+					case types.ActionDelete:
 						watch.deleteTaskGroup(data.Item.(*schedtypes.TaskGroup))
-					case "Update":
+					case types.ActionUpdate:
 						watch.updateTaskGroup(data.Item.(*schedtypes.TaskGroup))
 					}
 				} else {
-					blog.Warn("ExportServiceWatch recieve unknown data action(type:%s, action:%s)", data.DataType, data.Action)
+					blog.Warn("ExportServiceWatch receive unknown data action(type:%s, action:%s)", data.DataType, data.Action)
 				}
 			}
 
@@ -129,17 +139,17 @@ func (watch *ExportServiceWatch) worker(cxt context.Context) {
 
 func (watch *ExportServiceWatch) addService(service *commtypes.BcsService) {
 	key := service.ObjectMeta.NameSpace + "." + service.ObjectMeta.Name
-	blog.Info("ExportServiceWatch recieve addService(%+v)", service)
+	blog.Info("ExportServiceWatch receive addService(%+v)", service)
 
 	groupLabel := service.ObjectMeta.Labels["BCSGROUP"]
 	if groupLabel == "" {
-		blog.Info("ExportServiceWatch recieve addService(%s), no BCSGROUP label, do nothing", key)
+		blog.Info("ExportServiceWatch receive addService(%s), no BCSGROUP label, do nothing", key)
 		return
 	}
 
 	_, exist, err := watch.esInfoCache.GetByKey(key)
 	if err != nil {
-		blog.Error("when recieve addService event, get esInfo %s from cache return err:%s", key, err.Error())
+		blog.Error("when receive addService event, get esInfo %s from cache return err:%s", key, err.Error())
 	}
 	if exist == true {
 		blog.V(3).Infof("when receive addService event, esInfo %s is in already in cache, will be updated", key)
@@ -162,18 +172,18 @@ func (watch *ExportServiceWatch) addService(service *commtypes.BcsService) {
 
 	watch.AddEvent(esInfo.exportService)
 
-	blog.Infof("ExportServiceWatch recieve addService(%+v) end", service)
+	blog.Infof("ExportServiceWatch receive addService(%+v) end", service)
 
 	return
 }
 
 func (watch *ExportServiceWatch) deleteService(service *commtypes.BcsService) {
 	key := service.ObjectMeta.NameSpace + "." + service.ObjectMeta.Name
-	blog.Info("ExportServiceWatch recieve deleteService(%+v)", service)
+	blog.Info("ExportServiceWatch receive deleteService(%+v)", service)
 
 	groupLabel := service.ObjectMeta.Labels["BCSGROUP"]
 	if groupLabel == "" {
-		blog.Info("ExportServiceWatch recieve deleteService(%s), no BCSGROUP label, do nothing", key)
+		blog.Info("ExportServiceWatch receive deleteService(%s), no BCSGROUP label, do nothing", key)
 		return
 	}
 
@@ -208,11 +218,11 @@ func (watch *ExportServiceWatch) deleteService(service *commtypes.BcsService) {
 // maybe we can do different work for different changed contents
 func (watch *ExportServiceWatch) updateService(service *commtypes.BcsService) {
 	key := service.ObjectMeta.NameSpace + "." + service.ObjectMeta.Name
-	blog.V(3).Infof("ExportServiceWatch recieve updateService(%+v)", service)
+	blog.V(3).Infof("ExportServiceWatch receive updateService(%+v)", service)
 
 	groupLabel := service.ObjectMeta.Labels["BCSGROUP"]
 	if groupLabel == "" {
-		blog.Info("ExportServiceWatch recieve updateService(%s), no BCSGROUP label, do nothing", key)
+		blog.Info("ExportServiceWatch receive updateService(%s), no BCSGROUP label, do nothing", key)
 		return
 	}
 
@@ -298,54 +308,63 @@ func (watch *ExportServiceWatch) createEpServiceInfo(service *commtypes.BcsServi
 	return esInfo
 }
 
-func (watch *ExportServiceWatch) getTaskGroupServiceLabel(service *commtypes.BcsService, tskgroup *schedtypes.TaskGroup) string {
+func (watch *ExportServiceWatch) getTaskGroupServiceLabel(service *commtypes.BcsService, tskgroup *schedtypes.TaskGroup) bool {
 	if tskgroup.ObjectMeta.NameSpace != "" && service.ObjectMeta.NameSpace != tskgroup.ObjectMeta.NameSpace {
-		blog.V(3).Infof("namespace of service (%s %s) and taskgroup (%s %s) is different",
-			service.NameSpace, service.Name, tskgroup.ObjectMeta.NameSpace, tskgroup.ID)
-		return ""
+		blog.V(3).Infof("namespace of service (%s.%s) and taskgroup (%s) is different",
+			service.NameSpace, service.Name, tskgroup.ID)
+		return false
 	}
-
+	//if task.labels==nil, then return false
+	task := tskgroup.Taskgroup[0]
+	if task.Labels == nil {
+		return false
+	}
 	key := service.ObjectMeta.NameSpace + "." + service.ObjectMeta.Name
 	for ks, vs := range service.Spec.Selector {
-		//blog.V(3).Infof("check service %s selector label:%s -> %s", key, ks, vs)
-		task := tskgroup.Taskgroup[0]
-		if task.Labels == nil {
-			return ""
+		vt, ok := task.Labels[ks]
+		if !ok {
+			blog.V(3).Infof("taskgroup label not match service: taskgroup(%s) label(%s:%s) service(%s)",
+				tskgroup.ID, ks, vs, key)
+			return false
 		}
-		for kt, vt := range task.Labels {
-			blog.V(3).Infof("check task(%s) label(%s:%s) with selector label(%s:%s)", task.Name, kt, vt, ks, vs)
-			if ks == kt && vs == vt {
-				blog.V(3).Infof("task label match service: task(%s) label(%s:%s) service(%s)", task.Name, kt, vt, key)
-				return vt
-			}
+		if vs != vt {
+			blog.V(3).Infof("taskgroup label not match service: taskgroup(%s) label(%s:%s) service(%s)",
+				tskgroup.ID, ks, vs, key)
+			return false
 		}
 	}
-	return ""
+	blog.V(3).Infof("tskgroup label match service: task(%s) service(%s)", tskgroup.Name, key)
+	return true
 }
 
-func (watch *ExportServiceWatch) getApplicationServiceLabel(service *commtypes.BcsService, app *schedtypes.Application) string {
+func (watch *ExportServiceWatch) getApplicationServiceLabel(service *commtypes.BcsService, app *schedtypes.Application) bool {
 	if service.ObjectMeta.NameSpace != app.ObjectMeta.NameSpace {
-		blog.V(3).Infof("namespace of service (%s %s) and application (%s %s) is different",
+		blog.V(3).Infof("namespace of service (%s.%s) and application (%s.%s) is different",
 			service.NameSpace, service.Name, app.ObjectMeta.NameSpace, app.ID)
-		return ""
+		return false
 	}
 
 	key := service.ObjectMeta.NameSpace + "." + service.ObjectMeta.Name
 	for ks, vs := range service.Spec.Selector {
-
-		for kt, vt := range app.ObjectMeta.Labels {
-			blog.V(3).Infof("check application(%s %s) label(%s:%s) with selector label(%s:%s)", app.RunAs, app.ID, kt, vt, ks, vs)
-			if ks == kt && vs == vt {
-				blog.V(3).Infof("application label match service: application(%s %s) label(%s:%s) service(%s)", app.RunAs, app.ID, kt, vt, key)
-				return vt
-			}
+		vt, ok := app.ObjectMeta.Labels[ks]
+		if !ok {
+			blog.V(3).Infof("application label not match service: application(%s.%s) label(%s:%s) service(%s)",
+				app.RunAs, app.ID, ks, vs, key)
+			return false
+		}
+		if vs != vt {
+			blog.V(3).Infof("application label not match service: application(%s.%s) label(%s:%s) service(%s)",
+				app.RunAs, app.ID, ks, vs, key)
+			return false
 		}
 	}
-	return ""
+	blog.V(3).Infof("application label match service: application(%s.%s) service(%s)",
+		app.RunAs, app.ID, key)
+	return true
 }
 
 func (watch *ExportServiceWatch) addEpBackend(ep *lbtypes.ExportPort, backend *lbtypes.Backend) bool {
-	if backend.TargetIP == "" || backend.TargetPort <= 0 || backend.Label[0] == "" {
+	if backend.TargetIP == "" || backend.TargetPort <= 0 {
 		blog.Error("ExportServiceWatch add backend, backend data not correct: %+v", backend)
 		return false
 	}
@@ -412,11 +431,11 @@ func (watch *ExportServiceWatch) addTaskGroup(tskgroup *schedtypes.TaskGroup) {
 		}
 
 		// check matching of selector and task label
-		label := watch.getTaskGroupServiceLabel(esInfo.bcsService, tskgroup)
-		if label == "" {
+		isFit := watch.getTaskGroupServiceLabel(esInfo.bcsService, tskgroup)
+		if !isFit {
 			continue
 		}
-		blog.V(3).Infof("ExportServiceWatch: %s, match task label(%s:%s) ", key, tskgroup.ID, label)
+		blog.V(3).Infof("ExportServiceWatch: %s, match taskgroup %s fit ", key, tskgroup.ID)
 
 		//build backend info
 		for index, oneEsPort := range esInfo.exportService.ServicePort {
@@ -425,7 +444,7 @@ func (watch *ExportServiceWatch) addTaskGroup(tskgroup *schedtypes.TaskGroup) {
 					if oneEsPort.Name == onePort.Name {
 						//match a port
 						backend := new(lbtypes.Backend)
-						backend.Label = append(backend.Label, label)
+						//backend.Label = append(backend.Label, label)
 						// get IP info from executer reported task.StatusData
 						if len(oneTask.StatusData) == 0 {
 							blog.V(3).Infof("ExportServiceWatch: %s, task %s StatusData is empty, cannot add to backend", key, oneTask.ID)
@@ -438,10 +457,10 @@ func (watch *ExportServiceWatch) addTaskGroup(tskgroup *schedtypes.TaskGroup) {
 								key, oneTask.ID, err.Error())
 							continue
 						}
-						if strings.ToLower(oneTask.Network) == "host" {
+						if strings.ToLower(oneTask.Network) == networkHost {
 							backend.TargetIP = bcsInfo.NodeAddress
 							backend.TargetPort = int(onePort.ContainerPort)
-						} else if strings.ToLower(oneTask.Network) == "bridge" {
+						} else if strings.ToLower(oneTask.Network) == networkBridge {
 							if onePort.HostPort > 0 {
 								backend.TargetIP = bcsInfo.NodeAddress
 								backend.TargetPort = int(onePort.HostPort)
@@ -449,7 +468,7 @@ func (watch *ExportServiceWatch) addTaskGroup(tskgroup *schedtypes.TaskGroup) {
 								backend.TargetIP = bcsInfo.IPAddress
 								backend.TargetPort = int(onePort.ContainerPort)
 							}
-						} else if strings.ToLower(oneTask.NetworkType) == "cnm" {
+						} else if strings.ToLower(oneTask.NetworkType) == networkTypeCNM {
 							if onePort.HostPort > 0 {
 								backend.TargetIP = bcsInfo.NodeAddress
 								backend.TargetPort = int(onePort.HostPort)
@@ -507,11 +526,11 @@ func (watch *ExportServiceWatch) updateTaskGroup(tskgroup *schedtypes.TaskGroup)
 		}
 
 		// check matching of selector and task label
-		label := watch.getTaskGroupServiceLabel(esInfo.bcsService, tskgroup)
-		if label == "" {
+		isFit := watch.getTaskGroupServiceLabel(esInfo.bcsService, tskgroup)
+		if !isFit {
 			continue
 		}
-		blog.V(3).Infof("ExportServiceWatch: %s, match task label(%s: %s) ", key, tskgroup.ID, label)
+		blog.V(3).Infof("ExportServiceWatch: %s, match taskgroup %s fit", key, tskgroup.ID)
 		//build backend info
 		for index, oneEsPort := range esInfo.exportService.ServicePort {
 			blog.V(3).Infof("export service: %s, name(%s) ", key, oneEsPort.Name)
@@ -521,7 +540,7 @@ func (watch *ExportServiceWatch) updateTaskGroup(tskgroup *schedtypes.TaskGroup)
 					if oneEsPort.Name == onePort.Name {
 						//match a port
 						backend := new(lbtypes.Backend)
-						backend.Label = append(backend.Label, label)
+						//backend.Label = append(backend.Label, label)
 						// get IP info from executer reported task.StatusData
 						if len(oneTask.StatusData) == 0 {
 							blog.V(3).Infof("ExportServiceWatch: %s, task %s StatusData is empty, cannot add or delete backend", key, oneTask.ID)
@@ -534,10 +553,10 @@ func (watch *ExportServiceWatch) updateTaskGroup(tskgroup *schedtypes.TaskGroup)
 								key, oneTask.ID, err.Error())
 							continue
 						}
-						if strings.ToLower(oneTask.Network) == "host" {
+						if strings.ToLower(oneTask.Network) == networkHost {
 							backend.TargetIP = bcsInfo.NodeAddress
 							backend.TargetPort = int(onePort.ContainerPort)
-						} else if strings.ToLower(oneTask.Network) == "bridge" {
+						} else if strings.ToLower(oneTask.Network) == networkBridge {
 							if onePort.HostPort > 0 {
 								backend.TargetIP = bcsInfo.NodeAddress
 								backend.TargetPort = int(onePort.HostPort)
@@ -545,7 +564,7 @@ func (watch *ExportServiceWatch) updateTaskGroup(tskgroup *schedtypes.TaskGroup)
 								backend.TargetIP = bcsInfo.IPAddress
 								backend.TargetPort = int(onePort.ContainerPort)
 							}
-						} else if strings.ToLower(oneTask.NetworkType) == "cnm" {
+						} else if strings.ToLower(oneTask.NetworkType) == networkTypeCNM {
 							if onePort.HostPort > 0 {
 								backend.TargetIP = bcsInfo.NodeAddress
 								backend.TargetPort = int(onePort.HostPort)
@@ -607,12 +626,12 @@ func (watch *ExportServiceWatch) deleteTaskGroup(tskgroup *schedtypes.TaskGroup)
 			continue
 		}
 		// check matching of selector and task label
-		label := watch.getTaskGroupServiceLabel(esInfo.bcsService, tskgroup)
-		if label == "" {
+		isFit := watch.getTaskGroupServiceLabel(esInfo.bcsService, tskgroup)
+		if !isFit {
 			continue
 		}
 
-		blog.V(3).Infof("ExportServiceWatch: %s, match task label(%s: %s) ", key, tskgroup.ID, label)
+		blog.V(3).Infof("ExportServiceWatch: %s, match taskgroup %s fit", key, tskgroup.ID)
 
 		//delete backend
 		for index, oneEsPort := range esInfo.exportService.ServicePort {
@@ -621,7 +640,7 @@ func (watch *ExportServiceWatch) deleteTaskGroup(tskgroup *schedtypes.TaskGroup)
 					if oneEsPort.Name == onePort.Name {
 						//match a port
 						backend := new(lbtypes.Backend)
-						backend.Label = append(backend.Label, label)
+						//backend.Label = append(backend.Label, label)
 						// get IP info from executer reported task.StatusData
 						if len(oneTask.StatusData) == 0 {
 							blog.V(3).Infof("ExportServiceWatch: %s, task %s StatusData is empty, cannot add or delete backend", key, oneTask.ID)
@@ -635,10 +654,10 @@ func (watch *ExportServiceWatch) deleteTaskGroup(tskgroup *schedtypes.TaskGroup)
 								key, oneTask.ID, err.Error())
 							continue
 						}
-						if strings.ToLower(oneTask.Network) == "host" {
+						if strings.ToLower(oneTask.Network) == networkHost {
 							backend.TargetIP = bcsInfo.NodeAddress
 							backend.TargetPort = int(onePort.ContainerPort)
-						} else if strings.ToLower(oneTask.Network) == "bridge" {
+						} else if strings.ToLower(oneTask.Network) == networkBridge {
 							if onePort.HostPort > 0 {
 								backend.TargetIP = bcsInfo.NodeAddress
 								backend.TargetPort = int(onePort.HostPort)
@@ -646,7 +665,7 @@ func (watch *ExportServiceWatch) deleteTaskGroup(tskgroup *schedtypes.TaskGroup)
 								backend.TargetIP = bcsInfo.IPAddress
 								backend.TargetPort = int(onePort.ContainerPort)
 							}
-						} else if strings.ToLower(oneTask.NetworkType) == "cnm" {
+						} else if strings.ToLower(oneTask.NetworkType) == networkTypeCNM {
 							if onePort.HostPort > 0 {
 								backend.TargetIP = bcsInfo.NodeAddress
 								backend.TargetPort = int(onePort.HostPort)
@@ -702,7 +721,11 @@ func (watch *ExportServiceWatch) AddEvent(obj interface{}) {
 		Action:   "Add",
 		Item:     tmpData,
 	}
-	watch.report.ReportData(sync)
+	if err := watch.report.ReportData(sync); err != nil {
+		util.ReportSyncTotal(watch.report.GetClusterID(), cluster.DataTypeExpSVR, types.ActionAdd, cluster.SyncFailure)
+	} else {
+		util.ReportSyncTotal(watch.report.GetClusterID(), cluster.DataTypeExpSVR, types.ActionAdd, cluster.SyncSuccess)
+	}
 }
 
 //DeleteEvent when delete
@@ -718,7 +741,11 @@ func (watch *ExportServiceWatch) DeleteEvent(obj interface{}) {
 		Action:   "Delete",
 		Item:     tmpData,
 	}
-	watch.report.ReportData(sync)
+	if err := watch.report.ReportData(sync); err != nil {
+		util.ReportSyncTotal(watch.report.GetClusterID(), cluster.DataTypeExpSVR, types.ActionDelete, cluster.SyncFailure)
+	} else {
+		util.ReportSyncTotal(watch.report.GetClusterID(), cluster.DataTypeExpSVR, types.ActionDelete, cluster.SyncSuccess)
+	}
 }
 
 //UpdateEvent when update
@@ -735,9 +762,14 @@ func (watch *ExportServiceWatch) UpdateEvent(obj interface{}) {
 		Action:   "Update",
 		Item:     tmpData,
 	}
-	watch.report.ReportData(sync)
+	if err := watch.report.ReportData(sync); err != nil {
+		util.ReportSyncTotal(watch.report.GetClusterID(), cluster.DataTypeExpSVR, types.ActionUpdate, cluster.SyncFailure)
+	} else {
+		util.ReportSyncTotal(watch.report.GetClusterID(), cluster.DataTypeExpSVR, types.ActionUpdate, cluster.SyncSuccess)
+	}
 }
 
+//GetExportserviceChannel get channel for dispatch
 func (watch *ExportServiceWatch) GetExportserviceChannel(exportservice *lbtypes.ExportService) string {
 
 	index := util.GetHashId(exportservice.ServiceName, ExportserviceThreadNum)
@@ -746,6 +778,7 @@ func (watch *ExportServiceWatch) GetExportserviceChannel(exportservice *lbtypes.
 
 }
 
+//SyncExportServiceBackends export service backend synchronization
 func (watch *ExportServiceWatch) SyncExportServiceBackends(esInfo *ExportServiceInfo) error {
 	basePath := fmt.Sprintf("%s/application/%s", watch.basePath, esInfo.exportService.Namespace)
 	blog.Info("sync all taskgroups under(%s)", basePath)
@@ -775,13 +808,13 @@ func (watch *ExportServiceWatch) SyncExportServiceBackends(esInfo *ExportService
 		}
 
 		// check matching of selector and task label
-		label := watch.getApplicationServiceLabel(esInfo.bcsService, application)
-		if label == "" {
+		isFit := watch.getApplicationServiceLabel(esInfo.bcsService, application)
+		if !isFit {
 			continue
 		}
 
-		blog.V(3).Infof("ExportServiceWatch: exportservice (%s %s) match application label(%s:%s) ",
-			esInfo.exportService.Namespace, esInfo.exportService.ServiceName, application.ID, label)
+		blog.V(3).Infof("ExportServiceWatch: exportservice (%s %s) match application %s label",
+			esInfo.exportService.Namespace, esInfo.exportService.ServiceName, application.ID)
 
 		tgList, _, err := watch.client.GetChildrenEx(appPath)
 		if err != nil {
@@ -818,6 +851,7 @@ func (watch *ExportServiceWatch) SyncExportServiceBackends(esInfo *ExportService
 	return nil
 }
 
+//SyncEpTaskgroupBackend convert taskgroup to exportservice endpoint
 func (watch *ExportServiceWatch) SyncEpTaskgroupBackend(esInfo *ExportServiceInfo, taskgroup *schedtypes.TaskGroup) error {
 	if taskgroup.Status != schedtypes.TASKGROUP_STATUS_RUNNING && taskgroup.Status != schedtypes.TASKGROUP_STATUS_LOST {
 		blog.V(3).Infof("ExportServiceWatch receive taskgroup add event, TaskGroup %s status %s, do nothing ", taskgroup.ID, taskgroup.Status)
@@ -825,13 +859,13 @@ func (watch *ExportServiceWatch) SyncEpTaskgroupBackend(esInfo *ExportServiceInf
 	}
 
 	// check matching of selector and task label
-	label := watch.getTaskGroupServiceLabel(esInfo.bcsService, taskgroup)
-	if label == "" {
+	isFit := watch.getTaskGroupServiceLabel(esInfo.bcsService, taskgroup)
+	if !isFit {
 		return nil
 	}
 
-	blog.V(3).Infof("ExportServiceWatch: exportservice (%s %s) match task label(%s:%s) ",
-		esInfo.exportService.Namespace, esInfo.exportService.ServiceName, taskgroup.ID, label)
+	blog.V(3).Infof("ExportServiceWatch: exportservice (%s %s) match taskgroup %s fit",
+		esInfo.exportService.Namespace, esInfo.exportService.ServiceName, taskgroup.ID)
 
 	//build backend info
 	for index, oneEsPort := range esInfo.exportService.ServicePort {
@@ -840,7 +874,7 @@ func (watch *ExportServiceWatch) SyncEpTaskgroupBackend(esInfo *ExportServiceInf
 				if oneEsPort.Name == onePort.Name {
 					//match a port
 					backend := new(lbtypes.Backend)
-					backend.Label = append(backend.Label, label)
+					//backend.Label = append(backend.Label, label)
 					// get IP info from executer reported task.StatusData
 					if len(oneTask.StatusData) == 0 {
 						blog.V(3).Infof("ExportServiceWatch: service (%s %s) task %s StatusData is empty, cannot add to backend",
@@ -859,13 +893,13 @@ func (watch *ExportServiceWatch) SyncEpTaskgroupBackend(esInfo *ExportServiceInf
 					}
 
 					//container docker host network, docker run --net=host
-					if strings.ToLower(oneTask.Network) == "host" {
+					if strings.ToLower(oneTask.Network) == networkHost {
 						backend.TargetIP = bcsInfo.NodeAddress
 						backend.TargetPort = int(onePort.ContainerPort)
 						blog.V(3).Infof("ExportServiceWatch: service (%s %s) backend targetip %s targetport %d",
 							esInfo.exportService.Namespace, esInfo.exportService.ServiceName, backend.TargetIP, backend.TargetPort)
 						//container docker bridge network, docker run --net=bridge
-					} else if strings.ToLower(oneTask.Network) == "bridge" {
+					} else if strings.ToLower(oneTask.Network) == networkBridge {
 						if onePort.HostPort > 0 {
 							backend.TargetIP = bcsInfo.NodeAddress
 							backend.TargetPort = int(onePort.HostPort)
@@ -876,7 +910,7 @@ func (watch *ExportServiceWatch) SyncEpTaskgroupBackend(esInfo *ExportServiceInf
 						blog.V(3).Infof("ExportServiceWatch: service (%s %s) backend targetip %s targetport %d",
 							esInfo.exportService.Namespace, esInfo.exportService.ServiceName, backend.TargetIP, backend.TargetPort)
 						//container docker user defined network, docker run --net=mynetwork
-					} else if strings.ToLower(oneTask.NetworkType) == "cnm" {
+					} else if strings.ToLower(oneTask.NetworkType) == networkTypeCNM {
 						if onePort.HostPort > 0 {
 							backend.TargetIP = bcsInfo.NodeAddress
 							backend.TargetPort = int(onePort.HostPort)

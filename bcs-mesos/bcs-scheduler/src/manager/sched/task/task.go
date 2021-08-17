@@ -14,14 +14,6 @@
 package task
 
 import (
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-common/common/codec"
-	bcstype "bk-bcs/bcs-common/common/types"
-	commtypes "bk-bcs/bcs-common/common/types"
-	offerP "bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/offer"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/mesosproto/mesos"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -29,10 +21,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/common/codec"
+	bcstype "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	commtypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/mesosproto/mesos"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	offerP "github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/offer"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store"
+
 	"github.com/golang/protobuf/proto"
 )
 
-// Build a new taskgroup ID from an old grouptask ID: the ID format is index.application.namespace.cluster.timestamp
+// ReBuildTaskGroupID Build a new taskgroup ID from an old grouptask ID: the ID format is index.application.namespace.cluster.timestamp
 // The new ID is different from old ID in timestamp.
 func ReBuildTaskGroupID(taskGroupID string) (string, error) {
 	splitID := strings.Split(taskGroupID, ".")
@@ -41,16 +42,16 @@ func ReBuildTaskGroupID(taskGroupID string) (string, error) {
 	}
 
 	appInstances := splitID[0]
-	appId := splitID[1]
+	appID := splitID[1]
 	appRunAs := splitID[2]
-	appClusterId := splitID[3]
+	appClusterID := splitID[3]
 	idTime := time.Now().UnixNano()
-	newTaskGroupID := fmt.Sprintf("%s.%s.%s.%s.%d", appInstances, appId, appRunAs, appClusterId, idTime)
+	newTaskGroupID := fmt.Sprintf("%s.%s.%s.%s.%d", appInstances, appID, appRunAs, appClusterID, idTime)
 
 	return newTaskGroupID, nil
 }
 
-// Create a taskgroup for an application, there are two methods to create a taskgroup:
+// CreateTaskGroup Create a taskgroup for an application, there are two methods to create a taskgroup:
 // 1: you can create a taskgroup with the input of version(application definition), ID(taskgroup ID), reason and store
 // 2: you can create a taskgroup with the input of version(application definition), appInstances, appClusterID, reason and store.
 // taskgroup ID will be appInstances.$appname(version).$namespace(version).appClusterID.$timestamp
@@ -70,11 +71,11 @@ func CreateTaskGroup(version *types.Version, ID string, appInstances uint64, app
 		} else {
 			splitID := strings.Split(ID, ".")
 			appInstances := splitID[0]
-			appId := splitID[1]
+			appID := splitID[1]
 			appRunAs := splitID[2]
-			appClusterId := splitID[3]
+			appClusterID := splitID[3]
 			idTimeStr := splitID[4]
-			taskID = fmt.Sprintf("%s.%d.%s.%s.%s.%s", idTimeStr, index, appInstances, appId, appRunAs, appClusterId)
+			taskID = fmt.Sprintf("%s.%d.%s.%s.%s.%s", idTimeStr, index, appInstances, appID, appRunAs, appClusterID)
 			taskInstance = appInstances
 		}
 		return taskID, taskInstance
@@ -127,9 +128,9 @@ func CreateTaskGroup(version *types.Version, ID string, appInstances uint64, app
 			// take new pointer to store uris
 			uris := make([]*commtypes.Uri, 0)
 			for _, uri := range process.Uris {
-				newUri := new(commtypes.Uri)
-				*newUri = *uri
-				uris = append(uris, newUri)
+				newURI := new(commtypes.Uri)
+				*newURI = *uri
+				uris = append(uris, newURI)
 			}
 			// process info
 			procInfo := &types.ProcDef{
@@ -166,7 +167,7 @@ func CreateTaskGroup(version *types.Version, ID string, appInstances uint64, app
 
 			taskgroup.Taskgroup = append(taskgroup.Taskgroup, &task)
 		}
-	case commtypes.BcsDataType_APP, "":
+	case commtypes.BcsDataType_APP, "", commtypes.BcsDataType_Daemonset:
 		// build container tasks
 		for index, container := range version.Container {
 			var task types.Task
@@ -177,11 +178,11 @@ func CreateTaskGroup(version *types.Version, ID string, appInstances uint64, app
 			} else {
 				splitID := strings.Split(ID, ".")
 				appInstances := splitID[0]
-				appId := splitID[1]
+				appID := splitID[1]
 				appRunAs := splitID[2]
-				appClusterId := splitID[3]
+				appClusterID := splitID[3]
 				idTimeStr := splitID[4]
-				task.ID = fmt.Sprintf("%s.%d.%s.%s.%s.%s", idTimeStr, index, appInstances, appId, appRunAs, appClusterId)
+				task.ID = fmt.Sprintf("%s.%d.%s.%s.%s.%s", idTimeStr, index, appInstances, appID, appRunAs, appClusterID)
 				taskInstance = appInstances
 			}
 			task.Kind = version.Kind
@@ -196,6 +197,7 @@ func CreateTaskGroup(version *types.Version, ID string, appInstances uint64, app
 			task.Network = container.Docker.Network
 			task.NetworkType = container.Docker.NetworkType
 			task.NetLimit = container.NetLimit
+			//task.Cpuset = container.Cpuset
 			if container.Docker.Parameters != nil {
 				for _, parameter := range container.Docker.Parameters {
 					task.Parameters = append(task.Parameters, &types.Parameter{
@@ -221,13 +223,14 @@ func CreateTaskGroup(version *types.Version, ID string, appInstances uint64, app
 			task.Command = container.Docker.Command
 			task.Arguments = container.Docker.Arguments
 			task.DataClass = container.DataClass
+			task.DataClass.Msgs = make([]*types.BcsMessage, 0)
 			if err := createTaskConfigMaps(&task, container.ConfigMaps, store); err != nil {
 				return nil, err
 			}
 			if err := createTaskSecrets(&task, container.Secrets, store); err != nil {
 				return nil, err
 			}
-			requestIpLabel := "io.tencent.bcs.netsvc.requestip." + taskInstance
+			requestIPLabel := "io.tencent.bcs.netsvc.requestip." + taskInstance
 			if version.Labels != nil {
 				task.Labels = make(map[string]string)
 				if task.Labels == nil {
@@ -235,7 +238,24 @@ func CreateTaskGroup(version *types.Version, ID string, appInstances uint64, app
 					return nil, fmt.Errorf("task.Labels == nil")
 				}
 				for k, v := range version.Labels {
-					if k == requestIpLabel {
+					if k == requestIPLabel {
+						k = "io.tencent.bcs.netsvc.requestip"
+						splitV := strings.Split(v, "|")
+						if len(splitV) >= 1 {
+							v = splitV[0]
+						}
+
+						blog.Info("task(%s) set io.tencent.bcs.netsvc.requestip = %s", task.ID, v)
+					}
+					task.Labels[k] = v
+				}
+			}
+			if version.ObjectMeta.Annotations != nil {
+				if task.Labels == nil {
+					task.Labels = make(map[string]string)
+				}
+				for k, v := range version.ObjectMeta.Annotations {
+					if k == requestIPLabel {
 						k = "io.tencent.bcs.netsvc.requestip"
 						splitV := strings.Split(v, "|")
 						if len(splitV) >= 1 {
@@ -363,8 +383,11 @@ func createTaskConfigMaps(task *types.Task, configMaps []commtypes.ConfigMap, st
 				blog.Warn("unkown configmap type:%s for task:%s", confItem.Type, task.ID)
 				continue
 			}
-			blog.Info("add task configmap message:%+v", msg)
+			by, _ := json.Marshal(msg)
+			blog.Info("add task %s configmap message: %s", task.ID, string(by))
 			task.DataClass.Msgs = append(task.DataClass.Msgs, msg)
+			by, _ = json.Marshal(task.DataClass)
+			blog.Infof("task %s dataclass(%s)", task.ID, string(by))
 		}
 	}
 	return nil
@@ -419,8 +442,8 @@ func createTaskHealthChecks(task *types.Task, healthChecks []*commtypes.HealthCh
 	task.Healthy = true
 	task.LocalMaxConsecutiveFailures = 0
 	excutorCheckNum := 0
-	remoteHttpCheckNum := 0
-	remoteTcpCheckNum := 0
+	remoteHTTPCheckNum := 0
+	remoteTCPCheckNum := 0
 	for _, healthCheck := range healthChecks {
 		switch healthCheck.Type {
 		case bcstype.BcsHealthCheckType_COMMAND:
@@ -457,8 +480,8 @@ func createTaskHealthChecks(task *types.Task, healthChecks []*commtypes.HealthCh
 				task.LocalMaxConsecutiveFailures = healthCheck.ConsecutiveFailures
 			}
 		case bcstype.BcsHealthCheckType_REMOTEHTTP:
-			remoteHttpCheckNum++
-			if remoteHttpCheckNum <= 1 {
+			remoteHTTPCheckNum++
+			if remoteHTTPCheckNum <= 1 {
 				task.HealthChecks = append(task.HealthChecks, healthCheck)
 				healthStatus := new(bcstype.BcsHealthCheckStatus)
 				healthStatus.Type = healthCheck.Type
@@ -467,8 +490,8 @@ func createTaskHealthChecks(task *types.Task, healthChecks []*commtypes.HealthCh
 				task.HealthCheckStatus = append(task.HealthCheckStatus, healthStatus)
 			}
 		case bcstype.BcsHealthCheckType_REMOTETCP:
-			remoteTcpCheckNum++
-			if remoteTcpCheckNum <= 1 {
+			remoteTCPCheckNum++
+			if remoteTCPCheckNum <= 1 {
 				task.HealthChecks = append(task.HealthChecks, healthCheck)
 				healthStatus := new(bcstype.BcsHealthCheckStatus)
 				healthStatus.Type = healthCheck.Type
@@ -1218,8 +1241,10 @@ func getTaskHealthCheckPort(task *types.Task, name string) (int32, error) {
 	}
 }
 
-// Create taskgroup information with offered resource, the information include: ports, slave attributions, health-check information etc.
-func CreateTaskGroupInfo(offer *mesos.Offer, version *types.Version, resources []*mesos.Resource, taskgroup *types.TaskGroup) *mesos.TaskGroupInfo {
+// CreateTaskGroupInfo Create taskgroup information with offered resource
+// the information include: ports, slave attributions, health-check information etc.
+func CreateTaskGroupInfo(offer *mesos.Offer, version *types.Version,
+	resources []*mesos.Resource, taskgroup *types.TaskGroup) *mesos.TaskGroupInfo {
 	blog.Info("build taskgroup(%s) with offer %s||%s", taskgroup.ID, offer.GetHostname(), *offer.GetId().Value)
 
 	taskgroup.AgentID = *offer.AgentId.Value
@@ -1236,7 +1261,8 @@ func CreateTaskGroupInfo(offer *mesos.Offer, version *types.Version, resources [
 				if oneData == nil {
 					continue
 				}
-				blog.V(3).Infof("version(RunAs:%s ID:%s), Constraint attribute(%s)", version.RunAs, version.ID, oneData.Name)
+				blog.V(3).Infof("version(RunAs:%s ID:%s), Constraint attribute(%s)",
+					version.RunAs, version.ID, oneData.Name)
 				// copy attribute from offer to taskgroup
 				isIn := false
 				for _, currAttribute := range taskgroup.Attributes {
@@ -1275,6 +1301,7 @@ func CreateTaskGroupInfo(offer *mesos.Offer, version *types.Version, resources [
 	}
 
 	if len(taskgroup.Taskgroup) <= 0 {
+		blog.Errorf("build taskgroup(%s) failed: taskgroup.Taskgroup is empty", taskgroup.ID)
 		return nil
 	}
 
@@ -1284,10 +1311,20 @@ func CreateTaskGroupInfo(offer *mesos.Offer, version *types.Version, resources [
 	executorResourceDone := false
 	for _, task := range taskgroup.Taskgroup {
 
+		//update task offer info
 		task.OfferId = *offer.GetId().Value
 		task.AgentId = *offer.AgentId.Value
 		task.AgentHostname = *offer.Hostname
 		task.AgentIPAddress, _ = offerP.GetOfferIp(offer)
+		//if task contains extended resources, then set device plugin socket address int it
+		for _, ex := range task.DataClass.ExtendedResources {
+			for _, re := range offer.GetResources() {
+				if re.GetName() == ex.Name {
+					//device plugin socket setted in role parameter
+					ex.Socket = re.GetRole()
+				}
+			}
+		}
 
 		resource := *task.DataClass.Resources
 		if !executorResourceDone && resource.Cpus >= 10*types.CPUS_PER_EXECUTOR {
@@ -1317,6 +1354,17 @@ func CreateTaskGroupInfo(offer *mesos.Offer, version *types.Version, resources [
 	return &taskgroupinfo
 }
 
+func getOfferCpusetResources(o *mesos.Offer) *mesos.Resource {
+	for _, i := range o.GetResources() {
+		if i.GetName() == "cpuset" {
+			return i
+		}
+	}
+
+	return nil
+}
+
+// GetTaskGroupID get taskgroup id from mesos information
 func GetTaskGroupID(taskGroupInfo *mesos.TaskGroupInfo) *string {
 	defID := proto.String("default")
 	if len(taskGroupInfo.Tasks) <= 0 {
@@ -1332,16 +1380,16 @@ func GetTaskGroupID(taskGroupInfo *mesos.TaskGroupInfo) *string {
 
 	//ID := strings.Join(splitID[2:], ".")
 
-	// appInstances, appID, appRunAs, appClusterId, idTime
+	// appInstances, appID, appRunAs, appClusterID, idTime
 	ID := fmt.Sprintf("%s.%s.%s.%s.%s", splitID[2], splitID[3], splitID[4], splitID[5], splitID[0])
 	return &ID
 }
 
-// Whether an taskgroup is in ending statuses
+// IsTaskGroupEnd Whether an taskgroup is in ending statuses
 func IsTaskGroupEnd(taskGroup *types.TaskGroup) bool {
 	for _, task := range taskGroup.Taskgroup {
 		status := task.Status
-		if status == types.TASK_STATUS_LOST || status == types.TASK_STATUS_STAGING || status == types.TASK_STATUS_STARTING || status == types.TASK_STATUS_RUNNING || status == types.TASK_STATUS_KILLING {
+		if status == types.TASK_STATUS_LOST || status == types.TASK_STATUS_STAGING || status == types.TASK_STATUS_STARTING || status == types.TASK_STATUS_RUNNING || status == types.TASK_STATUS_KILLING { //nolint
 			blog.Info("task %s status(%s), not end status", task.ID, status)
 			return false
 		}
@@ -1350,7 +1398,7 @@ func IsTaskGroupEnd(taskGroup *types.TaskGroup) bool {
 	return true
 }
 
-// Whether an taskgroup can be shutdown currently
+// CanTaskGroupShutdown Whether an taskgroup can be shutdown currently
 func CanTaskGroupShutdown(taskGroup *types.TaskGroup) bool {
 	for _, task := range taskGroup.Taskgroup {
 		status := task.Status
@@ -1363,7 +1411,7 @@ func CanTaskGroupShutdown(taskGroup *types.TaskGroup) bool {
 	return true
 }
 
-// Whether an taskgroup can be rescheduled currently
+// CanTaskGroupReschedule Whether an taskgroup can be rescheduled currently
 func CanTaskGroupReschedule(taskGroup *types.TaskGroup) bool {
 
 	for _, task := range taskGroup.Taskgroup {
@@ -1377,7 +1425,7 @@ func CanTaskGroupReschedule(taskGroup *types.TaskGroup) bool {
 	return true
 }
 
-// Check whether the version definition is correct
+// CheckVersion Check whether the version definition is correct
 func CheckVersion(version *types.Version, store store.Store) error {
 
 	for _, container := range version.Container {
@@ -1426,35 +1474,77 @@ func CheckVersion(version *types.Version, store store.Store) error {
 				}
 			}
 		}
+
+		//check image pull secret
+		//"imagePullUser": "secret::imagesecret||user"
+		//"imagePullPasswd": "secret::imagesecret||pwd"
+		err := checkImageSecret(store, version.RunAs, container.Docker.ImagePullUser)
+		if err != nil {
+			blog.Errorf(err.Error())
+			return err
+		}
+		err = checkImageSecret(store, version.RunAs, container.Docker.ImagePullPasswd)
+		if err != nil {
+			blog.Errorf(err.Error())
+			return err
+		}
 	}
 
 	//check requestIP labels "io.tencent.bcs.netsvc.requestip.*"
-	requestIpLabelNum := 0
+	requestIPLabelNum := 0
 	for k := range version.Labels {
 		splitK := strings.Split(k, ".")
 		if len(splitK) == 6 && splitK[3] == "netsvc" && splitK[4] == "requestip" {
-			//if strconv.Itoa(requestIpLabelNum) != splitK[5] {
-			//	return fmt.Errorf("label netsvc.requestip.%d not exist or not in correct position", requestIpLabelNum)
+			//if strconv.Itoa(requestIPLabelNum) != splitK[5] {
+			//	return fmt.Errorf("label netsvc.requestip.%d not exist or not in correct position", requestIPLabelNum)
 			//}
-			requestIpLabelNum++
+			requestIPLabelNum++
 		}
 	}
-	if requestIpLabelNum > 0 && requestIpLabelNum < int(version.Instances) {
-		return fmt.Errorf("label netsvc.requestip count(%d) < version.Instances(%d)", requestIpLabelNum, version.Instances)
+	if requestIPLabelNum > 0 && requestIPLabelNum < int(version.Instances) {
+		return fmt.Errorf("label netsvc.requestip count(%d) < version.Instances(%d)", requestIPLabelNum, version.Instances)
 	}
 
+	return nil
+}
+func checkImageSecret(store store.Store, ns, secret string) error {
+	if strings.HasPrefix(secret, "secret::") {
+		secretSplit := strings.Split(secret, "::")
+		if len(secretSplit) != 2 {
+			return fmt.Errorf("image secret(%s) format is invalid", secret)
+		}
+		userSplit := strings.Split(secretSplit[1], "||")
+		if len(userSplit) != 2 {
+			return fmt.Errorf("image secret(%s) format is invalid", secret)
+		}
+
+		secretName := strings.TrimSpace(userSplit[0])
+		secretKey := strings.TrimSpace(userSplit[1])
+		blog.Infof("to get user from secret(%s.%s::%s)", ns, secretName, secretKey)
+		bcsSecret, err := store.FetchSecret(ns, secretName)
+		if err != nil {
+			return fmt.Errorf("get bcssecret(%s.%s) err: %s", ns, secretName, err.Error())
+		}
+		if bcsSecret == nil {
+			return fmt.Errorf("bcssecret(%s.%s) not exist", ns, secretName)
+		}
+		_, ok := bcsSecret.Data[secretKey]
+		if ok == false {
+			return fmt.Errorf("bcssecret item(key:%s) not exist in bcssecret(%s.%s)", secretKey, ns, secretName)
+		}
+	}
 	return nil
 }
 
 // GetVersionRequestIpCount Get reserve IP number in version definition
 func GetVersionRequestIpCount(version *types.Version) int {
-	requestIpLabelNum := 0
+	requestIPLabelNum := 0
 	for k := range version.Labels {
 		splitK := strings.Split(k, ".")
 		if len(splitK) == 6 && splitK[3] == "netsvc" && splitK[4] == "requestip" {
-			requestIpLabelNum++
+			requestIPLabelNum++
 		}
 	}
 
-	return requestIpLabelNum
+	return requestIPLabelNum
 }

@@ -14,8 +14,8 @@
 package config
 
 import (
-	"bk-bcs/bcs-common/common/static"
-	"bk-bcs/bcs-services/bcs-api/options"
+	"github.com/Tencent/bk-bcs/bcs-common/common/static"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-api/options"
 )
 
 //CertConfig is configuration of Cert
@@ -55,8 +55,10 @@ type ApiServConfig struct {
 	ClientCert *CertConfig
 
 	BKE                      options.BKEOptions
+	TKE                      options.TKEOptions
 	Edition                  string
 	MesosWebconsoleProxyPort uint
+	PeerToken                string
 }
 
 var (
@@ -65,6 +67,7 @@ var (
 	BKIamAuth                  options.AuthOption
 	ClusterCredentialsFixtures options.CredentialsFixturesOptions
 	MesosWebconsoleProxyPort   uint
+	TkeConf                    options.TKEOptions
 )
 
 //NewApiServConfig create a config object

@@ -17,8 +17,8 @@ import (
 	"fmt"
 	"time"
 
-	regd "bk-bcs/bcs-common/common/RegisterDiscover"
-	"bk-bcs/bcs-common/common/blog"
+	regd "github.com/Tencent/bk-bcs/bcs-common/common/RegisterDiscover"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
 
 	"github.com/json-iterator/go"
 	"github.com/pkg/errors"
@@ -52,7 +52,7 @@ func NewNodeRegister(zkServerAddresses string, baseKey string, node Node) *NodeR
 
 		baseKey:                 baseKey,
 		zkServiceConnectTimeout: time.Duration(5 * time.Second),
-		node: node,
+		node:                    node,
 	}
 }
 
@@ -209,4 +209,3 @@ func (r *NodeRegister) Stop() error {
 	r.SendEmptyEvent()
 	return err
 }
-

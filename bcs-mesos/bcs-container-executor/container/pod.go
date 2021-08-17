@@ -14,7 +14,7 @@
 package container
 
 import (
-	schedTypes "bk-bcs/bcs-mesos/bcs-scheduler/src/types"
+	schedTypes "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
 )
 
 //PodStatus for imply container status in pod
@@ -59,7 +59,7 @@ type Pod interface {
 	GetPid() int                                      //get network infrastructure container pid
 	GetContainerID() string                           //get network infrastructure container id
 	GetPodID() string                                 //get pod id
-	GetNetStatus() string                             //get network ip address infomation
+	GetNetStatus() string                             //get network ip address information
 	GetPodStatus() PodStatus                          //pod status, see @PodStatus
 	GetMessage() string                               //Get status message
 	Init() error                                      //init pod, start network container
@@ -73,7 +73,7 @@ type Pod interface {
 	//update container resources limit
 	//para1: container id
 	//para2: resources,cpu mem
-	UpdateResources(string, *schedTypes.Resource) error
+	UpdateResources(string, *schedTypes.TaskResources) error
 	//commit image
 	//para1: container id
 	//para2: image name

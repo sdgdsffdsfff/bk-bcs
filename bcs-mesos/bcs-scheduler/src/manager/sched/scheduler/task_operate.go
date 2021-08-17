@@ -14,28 +14,34 @@
 package scheduler
 
 import (
-	"bk-bcs/bcs-common/common/blog"
-	bcstype "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/offer"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/strategy"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/task"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/mesosproto/mesos"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/mesosproto/sched"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 	"fmt"
-	"github.com/golang/protobuf/proto"
 	"net/http"
 	"time"
+	"errors"
+
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	bcstype "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/mesosproto/mesos"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/mesosproto/sched"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/offer"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/strategy"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/task"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/util"
+
+	"github.com/golang/protobuf/proto"
 )
 
-// Build an taskgroup for application:
+// BuildTaskGroup Build an taskgroup for application:
 // If ID is empty, the taskgroup's ID will created and its index will be app.Instances,
 // If ID is not empty, the taskgroup's ID will be inputted ID
 // You can input the reason to decribe why the taskgrop is built.
 // The taskgroup will be created in DB, application, and also will be outputted in related service
-func (s *Scheduler) BuildTaskGroup(version *types.Version, app *types.Application, ID string, reason string) (*types.TaskGroup, error) {
+func (s *Scheduler) BuildTaskGroup(version *types.Version, app *types.Application, id string, reason string) (
+	*types.TaskGroup, error) {
 
-	taskgroup, err := task.CreateTaskGroup(version, ID, app.Instances, app.ClusterId, reason, s.store)
+	taskgroup, err := task.CreateTaskGroup(version, id, app.Instances, app.ClusterId, reason, s.store)
 	if taskgroup == nil {
 		blog.Errorf("create taskgroup err: %s", err.Error())
 		return nil, err
@@ -46,17 +52,14 @@ func (s *Scheduler) BuildTaskGroup(version *types.Version, app *types.Applicatio
 		blog.Error("save taskgroup(%s) err: %s", taskgroup.ID, err.Error())
 		return nil, err
 	}
-
 	blog.Infof("build taskgroup %s for %s", taskgroup.ID, reason)
-
 	s.ServiceMgr.TaskgroupAdd(taskgroup)
-
 	podIndex := new(bcstype.BcsPodIndex)
 	podIndex.Name = taskgroup.ID
 	app.Pods = append(app.Pods, podIndex)
 	app.UpdateTime = time.Now().Unix()
-	if ID == "" {
-		app.Instances++
+	if id == "" {
+		app.Instances = uint64(len(app.Pods))
 	}
 
 	// add events
@@ -67,16 +70,16 @@ func (s *Scheduler) BuildTaskGroup(version *types.Version, app *types.Applicatio
 	return taskgroup, nil
 }
 
-// Launch an taskgroup with offered slave resource
+// LaunchTaskGroup Launch an taskgroup with offered slave resource
 func (s *Scheduler) LaunchTaskGroup(offer *mesos.Offer, taskGroup *mesos.TaskGroupInfo,
 	version *types.Version) (*http.Response, error) {
 
 	blog.Infof("launch %d tasks with offer %s", len(taskGroup.Tasks), *offer.GetId().Value)
 
-	executor := task.CreateBcsExecutorInfo(offer, task.GetTaskGroupID(taskGroup), version, s.store)
-	if executor == nil {
-		return nil, fmt.Errorf("create executor from version(%s.%s.%s) return nil",
-			version.RunAs, version.ID, version.Name)
+	executor, err := task.CreateBcsExecutorInfo(offer, task.GetTaskGroupID(taskGroup), version, s.store)
+	if err != nil {
+		return nil, fmt.Errorf("create executor from version(%s.%s.%s) failed, %s",
+			version.RunAs, version.ID, version.Name, err.Error())
 	}
 
 	call := &sched.Call{
@@ -87,7 +90,7 @@ func (s *Scheduler) LaunchTaskGroup(offer *mesos.Offer, taskGroup *mesos.TaskGro
 				offer.GetId(),
 			},
 			Operations: []*mesos.Offer_Operation{
-				&mesos.Offer_Operation{
+				{
 					Type: mesos.Offer_Operation_LAUNCH_GROUP.Enum(),
 					LaunchGroup: &mesos.Offer_Operation_LaunchGroup{
 						TaskGroup: taskGroup,
@@ -102,7 +105,7 @@ func (s *Scheduler) LaunchTaskGroup(offer *mesos.Offer, taskGroup *mesos.TaskGro
 	return s.send(call)
 }
 
-// Launch taskgroups with offered slave resource
+// LaunchTaskGroups Launch taskgroups with offered slave resource
 func (s *Scheduler) LaunchTaskGroups(offer *mesos.Offer, taskGroups []*mesos.TaskGroupInfo,
 	version *types.Version) (*http.Response, error) {
 
@@ -122,10 +125,10 @@ func (s *Scheduler) LaunchTaskGroups(offer *mesos.Offer, taskGroups []*mesos.Tas
 
 	for _, taskGroup := range taskGroups {
 
-		executor := task.CreateBcsExecutorInfo(offer, task.GetTaskGroupID(taskGroup), version, s.store)
-		if executor == nil {
-			return nil, fmt.Errorf("create executor from version(%s.%s.%s) return nil",
-				version.RunAs, version.ID, version.Name)
+		executor, err := task.CreateBcsExecutorInfo(offer, task.GetTaskGroupID(taskGroup), version, s.store)
+		if err != nil {
+			return nil, fmt.Errorf("create executor from version(%s.%s.%s) failed, %s",
+				version.RunAs, version.ID, version.Name, err.Error())
 		}
 
 		ops := &mesos.Offer_Operation{
@@ -141,9 +144,10 @@ func (s *Scheduler) LaunchTaskGroups(offer *mesos.Offer, taskGroups []*mesos.Tas
 	return s.send(call)
 }
 
-// Kill a taskgroup with taskgroup information
+// KillTaskGroup Kill a taskgroup with taskgroup information
 func (s *Scheduler) KillTaskGroup(taskGroup *types.TaskGroup) (*http.Response, error) {
-	blog.Info("kill taskgroup(%s) on ExecutorID(%s), AgentID(%s)", taskGroup.ID, taskGroup.ExecutorID, taskGroup.AgentID)
+	blog.Info("kill taskgroup(%s) on ExecutorID(%s), AgentID(%s)",
+		taskGroup.ID, taskGroup.ExecutorID, taskGroup.AgentID)
 	call := &sched.Call{
 		FrameworkId: s.framework.GetId(),
 		Type:        sched.Call_SHUTDOWN.Enum(),
@@ -160,18 +164,18 @@ func (s *Scheduler) KillTaskGroup(taskGroup *types.TaskGroup) (*http.Response, e
 	return s.send(call)
 }
 
-// Kill a taskgroup with the agent and executor ID
-func (s *Scheduler) KillExecutor(agentId, executerId string) (*http.Response, error) {
-	blog.Info("kill taskgroup on AgentID(%s), ExecutorID(%s)", agentId, executerId)
+// KillExecutor Kill a taskgroup with the agent and executor ID
+func (s *Scheduler) KillExecutor(agentID, executerID string) (*http.Response, error) {
+	blog.Info("kill taskgroup on AgentID(%s), ExecutorID(%s)", agentID, executerID)
 	call := &sched.Call{
 		FrameworkId: s.framework.GetId(),
 		Type:        sched.Call_SHUTDOWN.Enum(),
 		Shutdown: &sched.Call_Shutdown{
 			ExecutorId: &mesos.ExecutorID{
-				Value: &executerId,
+				Value: &executerID,
 			},
 			AgentId: &mesos.AgentID{
-				Value: &agentId,
+				Value: &agentID,
 			},
 		},
 	}
@@ -179,29 +183,12 @@ func (s *Scheduler) KillExecutor(agentId, executerId string) (*http.Response, er
 	return s.send(call)
 }
 
-// Delete a taskgroup:
+// DeleteTaskGroup Delete a taskgroup:
 // the taskgroup will delete from DB, application and service
 func (s *Scheduler) DeleteTaskGroup(app *types.Application, taskGroup *types.TaskGroup, reason string) error {
-
 	blog.Info("delete taskgroup %s for %s", taskGroup.ID, reason)
 	s.ServiceMgr.TaskgroupDelete(taskGroup)
-
-	err := s.store.DeleteTaskGroup(taskGroup.ID)
-	if err != nil {
-		blog.Error("delete taskgroup(%s) err: %s", taskGroup.ID, err.Error())
-		//return err
-	}
-
-	//release taskgroup's DeltaCPU, DeltaDisk, DeltaMem  20180530
-	//deltaCPU := taskGroup.CurrResource.Cpus - taskGroup.LaunchResource.Cpus
-	//deltaMem := taskGroup.CurrResource.Mem - taskGroup.LaunchResource.Mem
-	//deltaDisk := taskGroup.CurrResource.Disk - taskGroup.LaunchResource.Disk
-	//if deltaCPU != 0 || deltaMem != 0 || deltaDisk != 0 {
-	//	blog.Warnf("delete taskgroup(%s) on host(%s), release delta resources(%f | %f | %f)",
-	//				taskGroup.ID,  taskGroup.HostName, deltaCPU, deltaMem, deltaDisk)
-	s.UpdateAgentSchedInfo(taskGroup.HostName, taskGroup.ID, nil)
-	//}
-
+	// update app taskgroup index info
 	if app != nil {
 		delete := -1
 		for index, currPod := range app.Pods {
@@ -210,29 +197,68 @@ func (s *Scheduler) DeleteTaskGroup(app *types.Application, taskGroup *types.Tas
 				break
 			}
 		}
-		if delete == -1 {
-			return nil
+		if delete != -1 {
+			app.UpdateTime = time.Now().Unix()
+			app.Pods = append(app.Pods[:delete], app.Pods[delete+1:]...)
 		}
-		app.UpdateTime = time.Now().Unix()
-		app.Pods = append(app.Pods[:delete], app.Pods[delete+1:]...)
+	}
+
+	return s.deleteTaskGroup(taskGroup)
+}
+
+// Delete a taskgroup:
+// the taskgroup will delete from DB
+func (s *Scheduler) deleteTaskGroup(taskGroup *types.TaskGroup) error {
+	blog.Infof("delete taskgroup(%s) in store", taskGroup.ID)
+	// release taskgroup's DeltaCPU, DeltaDisk, DeltaMem
+	if err := s.UpdateAgentSchedInfo(taskGroup.HostName, taskGroup.ID, nil); err != nil {
+		blog.Errorf("update agent sched info %s failed when delete taskgroup %s", taskGroup.HostName, taskGroup.ID)
+	}
+
+	// update agentsetting taskgroup index info
+	nodeIP := taskGroup.GetAgentIp()
+	if nodeIP == "" {
+		blog.Errorf("taskgroup %s don't have nodeIP", taskGroup.ID)
+	} else {
+		// lock agentsetting
+		util.Lock.Lock(bcstype.BcsClusterAgentSetting{}, nodeIP)
+		defer util.Lock.UnLock(bcstype.BcsClusterAgentSetting{}, nodeIP)
+
+		agentsetting, err := s.store.FetchAgentSetting(nodeIP)
+		if err != nil && !errors.Is(err, store.ErrNoFound) {
+			blog.Errorf("fetch agentsetting %s failed: %s", nodeIP, err.Error())
+			return fmt.Errorf("fetch agentsetting %s failed: %s", nodeIP, err.Error())
+		}
+		if agentsetting == nil {
+			blog.Errorf("fetch agentsetting %s Not found", nodeIP)
+		} else {
+			delete := -1
+			for index, currPod := range agentsetting.Pods {
+				if currPod == taskGroup.ID {
+					delete = index
+					break
+				}
+			}
+			if delete != -1 {
+				agentsetting.Pods = append(agentsetting.Pods[:delete], agentsetting.Pods[delete+1:]...)
+				// TODO: to deal with save agent setting error
+				// save operation may failed when multiple operations are on same agent setting
+				err = s.store.SaveAgentSetting(agentsetting)
+				if err != nil {
+					blog.Errorf("save agentsetting %s failed when delete taskgroup, err %s", nodeIP, err.Error())
+				}
+			}
+		}
+	}
+	// delete taskgroup from store
+	if err := s.store.DeleteTaskGroup(taskGroup.ID); err != nil {
+		blog.Errorf("delete taskgroup(%s) err: %s", taskGroup.ID, err.Error())
+		return fmt.Errorf("delete taskgroup(%s) err: %s", taskGroup.ID, err.Error())
 	}
 	return nil
 }
 
-// Check whether the offer is match required resource
-//func (s *Scheduler) IsResourceFit(needResource *types.Resource, offer *mesos.Offer) bool {
-//	cpus, mem, disk := s.OfferedResources(offer)
-//	if needResource.Cpus <= cpus && needResource.Mem <= mem && needResource.Disk <= disk {
-//		return true
-//	}
-//
-//	blog.V(3).Infof("offer %s resource not enough: need(%f, %f, %f), offer(%f, %f, %f)",
-//		*(offer.Id.Value), needResource.Cpus, needResource.Mem, needResource.Disk, cpus, mem, disk)
-//
-//	return false
-//}
-
-// Check whether the offer is match required resource for launching a taskgroup
+// IsOfferResourceFitLaunch Check whether the offer is match required resource for launching a taskgroup
 func (s *Scheduler) IsOfferResourceFitLaunch(needResource *types.Resource, outOffer *offer.Offer) bool {
 
 	inOffer := outOffer.Offer
@@ -264,7 +290,42 @@ func (s *Scheduler) IsOfferResourceFitLaunch(needResource *types.Resource, outOf
 	return false
 }
 
-// Check whether the offer is match required resource for updating a taskgroup's resource
+// IsOfferExtendedResourcesFitLaunch check whether the offer is match extended resources for launching a taskgroup
+func (s *Scheduler) IsOfferExtendedResourcesFitLaunch(
+	needs map[string]*bcstype.ExtendedResource, outOffer *offer.Offer) bool {
+	// if version don't have extended resources, then return true
+	if needs == nil || len(needs) == 0 {
+		return true
+	}
+
+	for _, need := range needs {
+		resource := s.getNeedResourceOfOffer(outOffer.Offer, need.Name)
+		if resource == nil {
+			blog.V(3).Infof("offer %s don't have extended resources %s", outOffer.Offer.GetHostname(), need.Name)
+			return false
+		}
+		// if offer extended resources not enough, then return false
+		if need.Value > resource.GetScalar().GetValue() {
+			blog.V(3).Infof("offer %s extended resources %s not enough: need(%f), offer(%f)",
+				outOffer.Offer.GetHostname(), need.Name, need.Value, resource.GetScalar().GetValue())
+			return false
+		}
+	}
+	// if offer extended resources match fit, then return true
+	return true
+}
+
+func (s *Scheduler) getNeedResourceOfOffer(o *mesos.Offer, name string) *mesos.Resource {
+	for _, re := range o.GetResources() {
+		if re.GetName() == name {
+			return re
+		}
+	}
+
+	return nil
+}
+
+// IsOfferResourceFitUpdate Check whether the offer is match required resource for updating a taskgroup's resource
 func (s *Scheduler) IsOfferResourceFitUpdate(needResource *types.Resource, outOffer *offer.Offer) bool {
 
 	inOffer := outOffer.Offer
@@ -284,7 +345,7 @@ func (s *Scheduler) IsOfferResourceFitUpdate(needResource *types.Resource, outOf
 	return false
 }
 
-// Check whether the offer match version constraints
+// IsConstraintsFit Check whether the offer match version constraints
 func (s *Scheduler) IsConstraintsFit(version *types.Version, offer *mesos.Offer, taskgroupID string) bool {
 
 	isFit, _ := strategy.ConstraintsFit(version, offer, s.store, taskgroupID)

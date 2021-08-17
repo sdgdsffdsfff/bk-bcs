@@ -17,29 +17,34 @@ import (
 	"fmt"
 	"os"
 
-	"bk-bcs/bcs-common/common/version"
-	"bk-bcs/bcs-services/bcs-client/cmd/agent"
-	"bk-bcs/bcs-services/bcs-client/cmd/application"
-	"bk-bcs/bcs-services/bcs-client/cmd/available"
-	"bk-bcs/bcs-services/bcs-client/cmd/create"
-	deletion "bk-bcs/bcs-services/bcs-client/cmd/delete"
-	"bk-bcs/bcs-services/bcs-client/cmd/deployment"
-	"bk-bcs/bcs-services/bcs-client/cmd/env"
-	"bk-bcs/bcs-services/bcs-client/cmd/get"
-	"bk-bcs/bcs-services/bcs-client/cmd/inspect"
-	"bk-bcs/bcs-services/bcs-client/cmd/list"
-	"bk-bcs/bcs-services/bcs-client/cmd/offer"
-	"bk-bcs/bcs-services/bcs-client/cmd/template"
-	"bk-bcs/bcs-services/bcs-client/cmd/update"
-	"bk-bcs/bcs-services/bcs-client/cmd/utils"
-
+	"github.com/Tencent/bk-bcs/bcs-common/common/version"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/add"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/agent"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/application"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/available"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/batch"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/create"
+	deletion "github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/delete"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/deployment"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/env"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/exec"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/get"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/inspect"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/list"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/offer"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/permission"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/refresh"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/template"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/transaction"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/update"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/utils"
 	"github.com/urfave/cli"
 )
 
 func main() {
 	bcsCli := cli.NewApp()
 	bcsCli.Name = "bcs client"
-	bcsCli.Usage = "command-line client for bcs"
+	bcsCli.Usage = "command-line client for BlueKing Container Service"
 	cliVersion := fmt.Sprintf("\n%s", version.GetVersion())
 	bcsCli.Version = cliVersion
 
@@ -52,7 +57,6 @@ func main() {
 		list.NewListCommand(),
 		inspect.NewInspectCommand(),
 		get.NewGetCommand(),
-		//metric.NewMetricCommand(),
 		deployment.NewCancelCommand(),
 		deployment.NewPauseCommand(),
 		deployment.NewResumeCommand(),
@@ -64,6 +68,13 @@ func main() {
 		offer.NewOfferCommand(),
 		agent.NewAgentSettingCommand(),
 		template.NewTemplateCommand(),
+		batch.NewApplyCommand(),
+		batch.NewCleanCommand(),
+		refresh.NewRefreshCommand(),
+		add.NewAddCommand(),
+		exec.NewExecCommand(),
+		permission.NewPermissionCommand(),
+		transaction.NewTransactionCommand(),
 	}
 
 	if err := utils.InitCfg(); err != nil {

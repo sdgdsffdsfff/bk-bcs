@@ -15,9 +15,11 @@ package get
 
 import (
 	"fmt"
-
-	"bk-bcs/bcs-services/bcs-client/cmd/utils"
-	"bk-bcs/bcs-services/bcs-client/pkg/scheduler/v4"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/utils"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/pkg/scheduler/v4"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/pkg/storage/v1"
+	userV1 "github.com/Tencent/bk-bcs/bcs-services/bcs-client/pkg/usermanager/v1"
+	"net/http"
 
 	"github.com/urfave/cli"
 )
@@ -25,11 +27,11 @@ import (
 func NewGetCommand() cli.Command {
 	return cli.Command{
 		Name:  "get",
-		Usage: "get the original definition of application/process/deployment",
+		Usage: "get the original definition of application/process/deployment/ippoolstatic/ippoolstatic-detail/user",
 		Flags: []cli.Flag{
 			cli.StringFlag{
 				Name:  "type, t",
-				Usage: "Get type, app/process/deployment",
+				Usage: "Get type, application(app)/process/deployment(deploy)/ippoolstatic(ipps)/ippoolstatic-detail(ippsd)/user",
 			},
 			cli.StringFlag{
 				Name:  "clusterid",
@@ -43,6 +45,18 @@ func NewGetCommand() cli.Command {
 			cli.StringFlag{
 				Name:  "name, n",
 				Usage: "Name",
+			},
+			cli.StringFlag{
+				Name:  "usertype",
+				Usage: "user type, value can be admin/saas/plain",
+			},
+			cli.StringFlag{
+				Name:  "username",
+				Usage: "user name",
+			},
+			cli.StringFlag{
+				Name:  "resourcetype",
+				Usage: "resource type, value can be cluster/storage/network-detection...",
 			},
 		},
 		Action: func(c *cli.Context) error {
@@ -68,6 +82,12 @@ func get(c *utils.ClientContext) error {
 		return getProcess(c)
 	case "deploy", "deployment":
 		return getDeployment(c)
+	case "ipps", "ippoolstatic":
+		return getIPPoolStatic(c)
+	case "ippsd", "ippoolstatic-detail":
+		return getIPPoolStaticDetail(c)
+	case "user":
+		return getUser(c)
 	default:
 		return fmt.Errorf("invalid type: %s", resourceType)
 	}
@@ -113,6 +133,58 @@ func getDeployment(c *utils.ClientContext) error {
 	}
 
 	return printGet(result)
+}
+
+func getIPPoolStatic(c *utils.ClientContext) error {
+	if err := c.MustSpecified(utils.OptionClusterID); err != nil {
+		return err
+	}
+
+	storage := v1.NewBcsStorage(utils.GetClientOption())
+
+	result, err := storage.ListIPPoolStatic(c.ClusterID(), nil)
+	if err != nil {
+		return fmt.Errorf("failed to get ippoolstatic: %v", err)
+	}
+
+	if len(result) == 0 {
+		fmt.Println("Resource Not Found.")
+		return nil
+	}
+	return printGet(result[0].Data)
+}
+
+func getIPPoolStaticDetail(c *utils.ClientContext) error {
+	if err := c.MustSpecified(utils.OptionClusterID); err != nil {
+		return err
+	}
+
+	storage := v1.NewBcsStorage(utils.GetClientOption())
+
+	result, err := storage.ListIPPoolStaticDetail(c.ClusterID(), nil)
+	if err != nil {
+		return fmt.Errorf("failed to get ippoolstatic-detail : %v", err)
+	}
+
+	if len(result) == 0 || len(result[0].Data) == 0 {
+		fmt.Println("Resource Not Found.")
+		return nil
+	}
+	return printGet(result[0].Data)
+}
+
+func getUser(c *utils.ClientContext) error {
+	if err := c.MustSpecified(utils.OptionUserName, utils.OptionUserType); err != nil {
+		return err
+	}
+
+	userManager := userV1.NewBcsUserManager(utils.GetClientOption())
+	user, err := userManager.CreateOrGetUser(c.String(utils.OptionUserType), c.String(utils.OptionUserName), http.MethodGet)
+	if err != nil {
+		return fmt.Errorf("failed to create user: %v", err)
+	}
+
+	return printGet(user)
 }
 
 func printGet(single interface{}) error {

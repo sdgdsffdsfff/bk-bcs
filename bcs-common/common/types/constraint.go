@@ -41,24 +41,25 @@ const (
 )
 
 const (
-	Constraint_Type_UNIQUE   = "UNIQUE"
-	Constraint_Type_CLUSTER  = "CLUSTER"
-	Constraint_Type_GROUP_BY = "GROUPBY"
-	Constraint_Type_MAX_PER  = "MAXPER"
-	Constraint_Type_LIKE     = "LIKE"
-	Constraint_Type_UNLIKE   = "UNLIKE"
-	Constraint_Type_EXCLUDE  = "EXCLUDE"
-	Constraint_Type_GREATER  = "GREATER"
+	Constraint_Type_UNIQUE     = "UNIQUE"
+	Constraint_Type_CLUSTER    = "CLUSTER"
+	Constraint_Type_GROUP_BY   = "GROUPBY"
+	Constraint_Type_MAX_PER    = "MAXPER"
+	Constraint_Type_LIKE       = "LIKE"
+	Constraint_Type_UNLIKE     = "UNLIKE"
+	Constraint_Type_EXCLUDE    = "EXCLUDE"
+	Constraint_Type_GREATER    = "GREATER"
+	Constraint_Type_TOLERATION = "TOLERATION"
 )
 
 type ConstraintData struct {
-	Name    string `json:"name"`
-	Operate string `json:"operate"`
-	Type   ConstraintValue_Type     `json:"type"`
-	Scalar *ConstraintValue_Scalar  `json:"scalar"`
-	Ranges []*ConstraintValue_Range `json:"ranges"`
-	Text   *ConstraintValue_Text    `json:"text"`
-	Set    *ConstraintValue_Set     `json:"set"`
+	Name    string                   `json:"name"`
+	Operate string                   `json:"operate"`
+	Type    ConstraintValue_Type     `json:"type"`
+	Scalar  *ConstraintValue_Scalar  `json:"scalar"`
+	Ranges  []*ConstraintValue_Range `json:"ranges"`
+	Text    *ConstraintValue_Text    `json:"text"`
+	Set     *ConstraintValue_Set     `json:"set"`
 }
 
 type ConstraintDataItem struct {

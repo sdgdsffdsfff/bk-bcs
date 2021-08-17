@@ -16,14 +16,14 @@ package basic
 import (
 	"os"
 
-	"bk-bcs/bcs-common/common/version"
+	"github.com/Tencent/bk-bcs/bcs-common/common/version"
 
 	"github.com/spf13/pflag"
 )
 
 // HandleVersionFlag handle --version flag
 func HandleVersionFlag(fs *pflag.FlagSet) {
-	ver := fs.Bool("version", false, "show version infomation")
+	ver := fs.Bool("version", false, "show version information")
 	pflag.Parse()
 
 	if *ver {

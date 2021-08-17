@@ -14,7 +14,7 @@
 package cluster
 
 import (
-	"bk-bcs/bcs-mesos/bcs-mesos-watch/types"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/types"
 
 	"golang.org/x/net/context"
 )
@@ -27,6 +27,7 @@ type DataExister interface {
 //Reporter for report data
 type Reporter interface {
 	ReportData(data *types.BcsSyncData) error
+	GetClusterID() string
 }
 
 //Cluster is interface for reading Cluster info

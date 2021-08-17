@@ -14,21 +14,26 @@
 package storage
 
 import (
-	"bk-bcs/bcs-common/common/blog"
-	lbtypes "bk-bcs/bcs-common/pkg/loadbalance/v2"
+	"time"
+
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	lbtypes "github.com/Tencent/bk-bcs/bcs-common/pkg/loadbalance/v2"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-mesos-watch/util"
 )
 
 //ExpServiceHandler handle for taskgroup
 type ExpServiceHandler struct {
-	oper DataOperator
+	oper      DataOperator
 	dataType  string
 	ClusterID string
 }
 
+//GetType implementation
 func (handler *ExpServiceHandler) GetType() string {
 	return handler.dataType
 }
 
+//CheckDirty clean dirty data implementation
 func (handler *ExpServiceHandler) CheckDirty() error {
 
 	// CANNOT DELETE NOW, BECAUSE WE DONNOT SYNC every 180s!!!!!
@@ -38,42 +43,82 @@ func (handler *ExpServiceHandler) CheckDirty() error {
 
 //Add handler to add
 func (handler *ExpServiceHandler) Add(data interface{}) error {
-	dataType := data.(*lbtypes.ExportService)
+	var (
+		dataType = data.(*lbtypes.ExportService)
+		started  = time.Now()
+	)
+
 	blog.V(3).Infof("ExportService %s-%s.%s handle add Event", handler.ClusterID, dataType.Namespace, dataType.ServiceName)
-
 	dataNode := "/bcsstorage/v1/mesos/watch/clusters/" + handler.ClusterID + "/namespaces/" + dataType.Namespace + "/" + handler.dataType + "/" + dataType.ServiceName
-	handler.oper.CreateDCNode(dataNode, data, "PUT")
 
+	if err := handler.oper.CreateDCNode(dataNode, data, "PUT"); err != nil {
+		util.ReportStorageMetrics(handler.ClusterID, dataTypeExpSVR, actionPut, handlerWatchClusterNamespaceTypeName, util.StatusFailure, started)
+	} else {
+		util.ReportStorageMetrics(handler.ClusterID, dataTypeExpSVR, actionPut, handlerWatchClusterNamespaceTypeName, util.StatusSuccess, started)
+	}
+
+	started2 := time.Now()
 	dataNode2 := "/bcsstorage/v1/mesos/dynamic/namespace_resources/clusters/" + handler.ClusterID + "/namespaces/" + dataType.Namespace + "/" + handler.dataType + "/" + dataType.ServiceName
-	handler.oper.CreateDCNode(dataNode2, data, "PUT")
 
+	if err := handler.oper.CreateDCNode(dataNode2, data, "PUT"); err != nil {
+		util.ReportStorageMetrics(handler.ClusterID, dataTypeExpSVR, actionPut, handlerClusterNamespaceTypeName, util.StatusFailure, started2)
+	} else {
+		util.ReportStorageMetrics(handler.ClusterID, dataTypeExpSVR, actionPut, handlerClusterNamespaceTypeName, util.StatusSuccess, started2)
+	}
 	return nil
 }
 
 //Delete delete info
 func (handler *ExpServiceHandler) Delete(data interface{}) error {
-	dataType := data.(*lbtypes.ExportService)
+	var (
+		dataType = data.(*lbtypes.ExportService)
+		started  = time.Now()
+	)
+
 	blog.V(3).Infof("ExportService %s-%s.%s handle delete Event", handler.ClusterID, dataType.Namespace, dataType.ServiceName)
-
 	dataNode := "/bcsstorage/v1/mesos/watch/clusters/" + handler.ClusterID + "/namespaces/" + dataType.Namespace + "/" + handler.dataType + "/" + dataType.ServiceName
-	handler.oper.DeleteDCNode(dataNode, "DELETE")
 
+	if err := handler.oper.DeleteDCNode(dataNode, "DELETE"); err != nil {
+		util.ReportStorageMetrics(handler.ClusterID, dataTypeExpSVR, actionDelete, handlerWatchClusterNamespaceTypeName, util.StatusFailure, started)
+	} else {
+		util.ReportStorageMetrics(handler.ClusterID, dataTypeExpSVR, actionDelete, handlerWatchClusterNamespaceTypeName, util.StatusSuccess, started)
+	}
+
+	started2 := time.Now()
 	dataNode2 := "/bcsstorage/v1/mesos/dynamic/namespace_resources/clusters/" + handler.ClusterID + "/namespaces/" + dataType.Namespace + "/" + handler.dataType + "/" + dataType.ServiceName
-	handler.oper.DeleteDCNode(dataNode2, "DELETE")
+
+	if err := handler.oper.DeleteDCNode(dataNode2, "DELETE"); err != nil {
+		util.ReportStorageMetrics(handler.ClusterID, dataTypeExpSVR, actionDelete, handlerClusterNamespaceTypeName, util.StatusFailure, started2)
+	} else {
+		util.ReportStorageMetrics(handler.ClusterID, dataTypeExpSVR, actionDelete, handlerClusterNamespaceTypeName, util.StatusSuccess, started2)
+	}
 
 	return nil
 }
 
 //Update update in zookeeper
 func (handler *ExpServiceHandler) Update(data interface{}) error {
-	dataType := data.(*lbtypes.ExportService)
+	var (
+		dataType = data.(*lbtypes.ExportService)
+		started  = time.Now()
+	)
+
 	blog.V(3).Infof("ExportService %s-%s.%s handle update event", handler.ClusterID, dataType.Namespace, dataType.ServiceName)
-
 	dataNode := "/bcsstorage/v1/mesos/watch/clusters/" + handler.ClusterID + "/namespaces/" + dataType.Namespace + "/" + handler.dataType + "/" + dataType.ServiceName
-	handler.oper.CreateDCNode(dataNode, data, "PUT")
 
+	if err := handler.oper.CreateDCNode(dataNode, data, "PUT"); err != nil {
+		util.ReportStorageMetrics(handler.ClusterID, dataTypeExpSVR, actionPut, handlerWatchClusterNamespaceTypeName, util.StatusFailure, started)
+	} else {
+		util.ReportStorageMetrics(handler.ClusterID, dataTypeExpSVR, actionPut, handlerWatchClusterNamespaceTypeName, util.StatusSuccess, started)
+	}
+
+	started2 := time.Now()
 	dataNode2 := "/bcsstorage/v1/mesos/dynamic/namespace_resources/clusters/" + handler.ClusterID + "/namespaces/" + dataType.Namespace + "/" + handler.dataType + "/" + dataType.ServiceName
-	handler.oper.CreateDCNode(dataNode2, data, "PUT")
+	if err := handler.oper.CreateDCNode(dataNode2, data, "PUT"); err != nil {
+		util.ReportStorageMetrics(handler.ClusterID, dataTypeExpSVR, actionPut, handlerClusterNamespaceTypeName, util.StatusFailure, started2)
+	} else {
+		util.ReportStorageMetrics(handler.ClusterID, dataTypeExpSVR, actionPut, handlerClusterNamespaceTypeName, util.StatusSuccess, started2)
+	}
 
 	return nil
 }

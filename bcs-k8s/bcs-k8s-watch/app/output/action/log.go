@@ -16,14 +16,12 @@ package action
 import (
 	"github.com/json-iterator/go"
 
-	glog "bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-k8s/bcs-k8s-watch/app/bcs"
+	glog "github.com/Tencent/bk-bcs/bcs-common/common/blog"
 )
 
 type LogAction struct {
-	Name           string
-	ClusterID      string
-	StorageService *bcs.StorageService
+	Name      string
+	ClusterID string
 }
 
 func (logAction *LogAction) Add(syncData *SyncData) {

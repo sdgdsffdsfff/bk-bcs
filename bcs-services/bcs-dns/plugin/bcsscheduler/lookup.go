@@ -23,9 +23,9 @@ import (
 	"strconv"
 	"strings"
 
-	bcstypes "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-common/common/util"
-	dnsUtil "bk-bcs/bcs-services/bcs-dns/plugin/util"
+	bcstypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/common/util"
+	dnsUtil "github.com/Tencent/bk-bcs/bcs-services/bcs-dns/plugin/util"
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/etcd/msg"
@@ -101,7 +101,7 @@ func (bcs *BcsScheduler) records(req recordRequest) ([]msg.Service, error) {
 
 func (bcs *BcsScheduler) svcRecords(req recordRequest) (*service, error) {
 	key := filepath.Join(req.namespace, req.serviceName)
-	epItem, ok, gerr := bcs.endpointCache.GetByKey(key)
+	epItem, ok, gerr := bcs.endpointCache.Store.GetByKey(key)
 	if !ok || gerr != nil {
 		log.Printf("[ERROR] DNSlookup Get no item with key %s in Cache", key)
 		return nil, errNoItems
@@ -204,14 +204,14 @@ func (bcs *BcsScheduler) recordsForNS(r recordRequest, svcs *[]msg.Service) erro
 }
 
 func (bcs *BcsScheduler) selfDNSRecord() dns.A {
-	//get local ip address & defualt dns name
+	//get local ip address & default dns name
 	addrList := util.GetIPAddress()
 	var self dns.A
 	if len(addrList) == 0 {
 		return self
 	}
 	self.Hdr.Name = defaultNSName
-	self.A = net.ParseIP(addrList[0])
+	self.A = net.ParseIP(addrList)
 	return self
 }
 

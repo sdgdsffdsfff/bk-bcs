@@ -17,13 +17,14 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"bk-bcs/bcs-common/common"
-	"bk-bcs/bcs-common/common/blog"
-	bhttp "bk-bcs/bcs-common/common/http"
-	bcstype "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/types"
+	"github.com/Tencent/bk-bcs/bcs-common/common"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	bhttp "github.com/Tencent/bk-bcs/bcs-common/common/http"
+	bcstype "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
 )
 
+// CreateDeployment create deployment, call scheduler create deployment api
 func (s *Scheduler) CreateDeployment(body []byte) (string, error) {
 	blog.Info("create deployment. param(%s)", string(body))
 	var param bcstype.BcsDeployment
@@ -40,7 +41,7 @@ func (s *Scheduler) CreateDeployment(body []byte) (string, error) {
 	if err != nil {
 		return err.Error(), err
 	}
-	//add  20181122
+	//store BcsDeployment original definition
 	deploymentDef.RawJson = &param
 
 	// post deploymentdef to bcs-mesos-scheduler,
@@ -73,7 +74,8 @@ func (s *Scheduler) CreateDeployment(body []byte) (string, error) {
 	return string(reply), nil
 }
 
-func (s *Scheduler) UpdateDeployment(body []byte) (string, error) {
+// UpdateDeployment do update deployment, call scheduler update deployment api
+func (s *Scheduler) UpdateDeployment(body []byte, args string) (string, error) {
 	blog.Info("udpate deployment. param(%s)", string(body))
 	var param bcstype.BcsDeployment
 
@@ -90,7 +92,7 @@ func (s *Scheduler) UpdateDeployment(body []byte) (string, error) {
 		return err.Error(), err
 	}
 
-	//add  20181122
+	//store BcsDeployment original definition
 	deploymentDef.RawJson = &param
 
 	// post deploymentdef to bcs-mesos-scheduler,
@@ -110,7 +112,7 @@ func (s *Scheduler) UpdateDeployment(body []byte) (string, error) {
 	name := deploymentDef.ObjectMeta.Name
 	namespace := deploymentDef.ObjectMeta.NameSpace
 
-	url := fmt.Sprintf("%s/v1/deployment/%s/%s", s.GetHost(), namespace, name)
+	url := fmt.Sprintf("%s/v1/deployment/%s/%s?args=%s", s.GetHost(), namespace, name, args)
 	blog.Info("post a request to url(%s), request:%s", url, string(data))
 
 	reply, err := s.client.PUT(url, nil, data)
@@ -234,6 +236,11 @@ func (s *Scheduler) scaleDeployment(ns, name string, instances int) (string, err
 }
 
 func (s *Scheduler) newDeploymentDefWithParam(param *bcstype.BcsDeployment) (*types.DeploymentDef, error) {
+	//check ObjectMeta is valid
+	err := param.MetaIsValid()
+	if err != nil {
+		return nil, err
+	}
 
 	deploymentDef := &types.DeploymentDef{
 		ObjectMeta: param.ObjectMeta,
@@ -294,7 +301,7 @@ func (s *Scheduler) newDeploymentDefWithParam(param *bcstype.BcsDeployment) (*ty
 		version.Labels[k] = v
 	}
 
-	version, err := s.setVersionWithPodSpec(version, param.Spec.Template)
+	version, err = s.setVersionWithPodSpec(version, param.Spec.Template)
 	if err != nil {
 		return nil, err
 	}

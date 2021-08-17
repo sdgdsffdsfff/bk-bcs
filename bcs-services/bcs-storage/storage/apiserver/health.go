@@ -16,12 +16,12 @@ package apiserver
 import (
 	"fmt"
 
-	"bk-bcs/bcs-common/common"
-	"bk-bcs/bcs-common/common/metric"
+	"github.com/Tencent/bk-bcs/bcs-common/common"
+	"github.com/Tencent/bk-bcs/bcs-common/common/metric"
 	"sync"
 )
 
-// healthZ interface
+// BcsHealthIf interface
 type BcsHealthIf struct {
 	Code    int          `json:"code"`
 	OK      bool         `json:"ok"`
@@ -29,6 +29,7 @@ type BcsHealthIf struct {
 	Message string       `json:"message"`
 }
 
+// SubStatus sub status
 type SubStatus struct {
 	OK      bool   `json:"ok"`
 	Message string `json:"message"`
@@ -43,12 +44,14 @@ var (
 		Data: healthStatus{
 			mongodbConfigKey: {OK: true, Message: ""},
 			zkConfigKey:      {OK: true, Message: ""},
+			queueConfigKey:   {OK: true, Message: ""},
 		},
 		Message: "",
 	}
 	healthLock sync.Mutex
 )
 
+// SetUnhealthy set storage to unhealthy status
 func SetUnhealthy(key string, message interface{}) {
 	healthLock.Lock()
 	defer healthLock.Unlock()
@@ -68,6 +71,7 @@ func SetUnhealthy(key string, message interface{}) {
 	hs.Message = fmt.Sprintf("%v", message)
 }
 
+// GetHealth get health info
 func GetHealth() metric.HealthMeta {
 	healthLock.Lock()
 	defer healthLock.Unlock()
@@ -78,6 +82,9 @@ func GetHealth() metric.HealthMeta {
 	}
 	if !storageHealth.Data[zkConfigKey].OK {
 		message += " | " + storageHealth.Data[zkConfigKey].Message
+	}
+	if !storageHealth.Data[queueConfigKey].OK {
+		message += " | " + storageHealth.Data[queueConfigKey].Message
 	}
 
 	return metric.HealthMeta{

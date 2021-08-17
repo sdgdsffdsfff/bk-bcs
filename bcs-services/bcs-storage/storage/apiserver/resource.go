@@ -18,54 +18,71 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-common/common/check"
-	"bk-bcs/bcs-common/common/conf"
-	"bk-bcs/bcs-common/common/encrypt"
-	"bk-bcs/bcs-common/common/http/httpserver"
-	"bk-bcs/bcs-services/bcs-storage/app/options"
-	"bk-bcs/bcs-services/bcs-storage/storage/actions"
-	"bk-bcs/bcs-services/bcs-storage/storage/drivers/mongodb"
-	"bk-bcs/bcs-services/bcs-storage/storage/drivers/zookeeper"
-	storageErr "bk-bcs/bcs-services/bcs-storage/storage/errors"
-	"bk-bcs/bcs-services/bcs-storage/storage/operator"
-
-	"gopkg.in/mgo.v2"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/common/check"
+	"github.com/Tencent/bk-bcs/bcs-common/common/conf"
+	"github.com/Tencent/bk-bcs/bcs-common/common/encrypt"
+	"github.com/Tencent/bk-bcs/bcs-common/common/http/httpserver"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/msgqueue"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/odm/drivers"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/odm/drivers/mongo"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/odm/operator"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/app/options"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/actions"
+	storageErr "github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/errors"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/store"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/store/zookeeper"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-storage/storage/watchbus"
 )
 
 const (
 	configKeySep     = "/"
 	mongodbConfigKey = "mongodb"
 	zkConfigKey      = "zk"
+	queueConfigKey   = "queue"
 )
 
+// MessageQueue queue object
+type MessageQueue struct {
+	QueueFlag       bool
+	ResourceToQueue map[string]string
+	MsgQueue        msgqueue.MessageQueue
+}
+
+// APIResource api resource object
 type APIResource struct {
 	Conf      *options.StorageOptions
 	ActionsV1 []*httpserver.Action
-	dbInfoMap map[string]*operator.DBInfo
+	storeMap  map[string]store.Store
+	dbMap     map[string]drivers.DB
+	ebusMap   map[string]*watchbus.EventBus
+	msgQueue  *MessageQueue
 }
 
 var api = APIResource{}
 
-// Get *APIResource that loads config from config-file and handlers from api-actions
+// GetAPIResource that loads config from config-file and handlers from api-actions
 func GetAPIResource() *APIResource {
 	return &api
 }
 
-// Set storageConfig to APIResource
+// SetConfig Set storageConfig to APIResource
 func (a *APIResource) SetConfig(op *options.StorageOptions) {
 	a.Conf = op
-
 	// parse config-map from file
 	dbConfig := a.ParseDBConfig()
 	blog.Infof("Begin to parse databases.")
 
-	// parse db config from config-map
-	a.dbInfoMap = make(map[string]*operator.DBInfo)
+	a.storeMap = make(map[string]store.Store)
+	a.dbMap = make(map[string]drivers.DB)
+	a.ebusMap = make(map[string]*watchbus.EventBus)
 	for _, key := range dbConfig.KeyList {
-		if _, ok := a.dbInfoMap[key]; ok {
+		if _, ok := a.storeMap[key]; ok {
+			blog.Warnf("Store config duplicated: %s", key)
+			continue
+		}
+		if _, ok := a.dbMap[key]; ok {
 			blog.Warnf("Database config duplicated: %s", key)
 			continue
 		}
@@ -78,10 +95,12 @@ func (a *APIResource) SetConfig(op *options.StorageOptions) {
 		switch s[0] {
 		case mongodbConfigKey:
 			if err = a.parseMongodb(key, dbConfig); err != nil {
+				blog.Errorf("parse mongodb failed, err %s", err.Error())
 				SetUnhealthy(mongodbConfigKey, err.Error())
 			}
 		case zkConfigKey:
 			if err = a.parseZk(key, dbConfig); err != nil {
+				blog.Errorf("parse zookeeper failed, err %s", err.Error())
 				SetUnhealthy(zkConfigKey, err.Error())
 			}
 		default:
@@ -94,167 +113,245 @@ func (a *APIResource) SetConfig(op *options.StorageOptions) {
 		}
 	}
 	blog.Infof("Databases parsing completed.")
+
+	// parse config-map from queue file
+	queueConfig := a.ParseQueueConfig()
+	blog.Infof("Begin to parse queueConfig.")
+
+	for _, key := range queueConfig.KeyList {
+		var err error
+		switch key {
+		case queueConfigKey:
+			if err = a.parseQueueInit(key, queueConfig); err != nil {
+				blog.Errorf("parse queue config failed, err %s", err.Error())
+				SetUnhealthy(queueConfigKey, err.Error())
+			}
+		default:
+			err = storageErr.QueueConfigUnknown
+			blog.Errorf("%v: %s", err, key)
+			SetUnhealthy("unknown_config", fmt.Sprintf("%v: %s", err, key))
+		}
+		if err != nil {
+			check.Occur(err)
+		}
+	}
+	blog.Infof("MsgQueue parsing completed.")
 }
 
-//
+// InitActions init actions
 func (a *APIResource) InitActions() {
 	a.ActionsV1 = append(a.ActionsV1, actions.GetApiV1Action()...)
 }
 
-func (a *APIResource) ParseDBConfig() (dbConf *conf.Config) {
-	dbConf = new(conf.Config)
+// ParseDBConfig parse db config
+func (a *APIResource) ParseDBConfig() *conf.Config {
+	dbConf := new(conf.Config)
 	if _, err := os.Stat(a.Conf.DBConfig); !os.IsNotExist(err) {
 		blog.Infof("Parsing config file: %s", a.Conf.DBConfig)
 		dbConf.InitConfig(a.Conf.DBConfig)
 	} else {
 		blog.Errorf("Config file not exists: %s", a.Conf.DBConfig)
 	}
-	return
+	return dbConf
 }
 
-func (a *APIResource) GetMongodbTankName(name string) string {
-	return getDriverName(mongodbConfigKey, name)
-}
+// ParseQueueConfig parse queue config
+func (a *APIResource) ParseQueueConfig() *conf.Config {
+	queueConf := new(conf.Config)
 
-func (a *APIResource) GetZkTankName(name string) string {
-	return getDriverName(zkConfigKey, name)
-}
-
-func (a *APIResource) getDBInfo(key string) (info *operator.DBInfo) {
-	var ok bool
-	info, ok = a.dbInfoMap[key]
-	if !ok {
-		blog.Errorf("Database Config not exists: %s", key)
-	}
-	return
-}
-
-func (a *APIResource) parseMongodb(key string, dbConf *conf.Config) (err error) {
-	address := dbConf.Read(key, "Addr")
-	timeoutRaw := dbConf.Read(key, "ConnectTimeout")
-	timeout, _ := strconv.Atoi(timeoutRaw)
-	database := dbConf.Read(key, "Database")
-	username := dbConf.Read(key, "Username")
-	password := dbConf.Read(key, "Password")
-	opLogCollection := dbConf.Read(key, "OpLogCollection")
-	isListener := dbConf.Read(key, "IsListener")
-	listenerName := dbConf.Read(key, "ListenerName")
-
-	var mode, modeRaw int
-	if modeRaw, err = strconv.Atoi(dbConf.Read(key, "Mode")); err != nil {
-		mode = int(mgo.Strong)
+	if _, err := os.Stat(a.Conf.QueueConfig); !os.IsNotExist(err) {
+		blog.Infof("Parsing queueConfig file: %s", a.Conf.QueueConfig)
+		queueConf.InitConfig(a.Conf.QueueConfig)
 	} else {
-		mode = modeRaw
+		blog.Errorf("Config file not exists: %s", a.Conf.QueueConfig)
 	}
 
-	if password != "" {
-		realPwd, _ := encrypt.DesDecryptFromBase([]byte(password))
-		password = string(realPwd)
-	}
-
-	a.dbInfoMap[key] = &operator.DBInfo{
-		Addr:           strings.Split(address, ","),
-		ConnectTimeout: time.Second * time.Duration(timeout),
-		Database:       database,
-		Username:       username,
-		Password:       password,
-		Mode:           mode,
-		ListenerName:   listenerName,
-	}
-
-	if !runWithTimeout(
-		func() {
-			if err = mongodb.RegisterMongodbTank(key, a.dbInfoMap[key]); err != nil {
-				blog.Errorf("register db config failed: %s | %v", key, err)
-			}
-		},
-		2*time.Second,
-	) {
-		blog.Errorf("register db config timeout: %s", key)
-		return fmt.Errorf("db connect timeout: %s", key)
-	}
-
-	if err != nil {
-		return
-	}
-
-	// check db connect and ping.
-	tank := mongodb.NewMongodbTank(key)
-	if err = tank.GetError(); err == nil {
-		blog.Infof("Complete parse mongodb config: %s", key)
-
-		// start watch if isWatch is set
-		if !(isListener == "" || isListener == "false") {
-			go mongodb.StartWatch(tank.Using("local").From(opLogCollection), listenerName)
-			blog.Infof("Start mongodb watch: %s", key)
-		}
-	} else {
-		blog.Errorf("Check db config failed: %s | %v", key, err)
-	}
-	return err
+	return queueConf
 }
 
-func (a *APIResource) parseZk(key string, dbConf *conf.Config) (err error) {
-	address := dbConf.Read(key, "Addr")
-	timeoutRaw := dbConf.Read(key, "ConnectTimeout")
-	timeout, _ := strconv.Atoi(timeoutRaw)
-	database := dbConf.Read(key, "Database")
-	username := dbConf.Read(key, "Username")
-	password := dbConf.Read(key, "Password")
-
-	if password != "" {
-		realPwd, _ := encrypt.DesDecryptFromBase([]byte(password))
-		password = string(realPwd)
-	}
-
-	a.dbInfoMap[key] = &operator.DBInfo{
-		Addr:           strings.Split(address, ","),
-		ConnectTimeout: time.Second * time.Duration(timeout),
-		Database:       database,
-		Username:       username,
-		Password:       password,
-	}
-
-	if !runWithTimeout(
-		func() {
-			if err = zookeeper.RegisterZkTank(key, a.dbInfoMap[key]); err != nil {
-				blog.Errorf("register db config failed: %s | %v", key, err)
-			}
-		},
-		2*time.Second,
-	) {
-		blog.Errorf("register db config timeout: %s", key)
-		return fmt.Errorf("db connect timeout: %s", key)
-	}
-
-	if err != nil {
-		return
-	}
-
-	// check db connect and ping.
-	if err = zookeeper.NewZkTank(key).GetError(); err == nil {
-		blog.Infof("Complete parse zk config: %s", key)
-	} else {
-		blog.Errorf("Check db config failed: %s | %v", key, err)
-	}
-	return err
+// GetMsgQueue get queue client
+func (a *APIResource) GetMsgQueue() *MessageQueue {
+	return a.msgQueue
 }
 
-func getDriverName(prefix, name string) string {
-	return prefix + configKeySep + name
-}
-
-func runWithTimeout(f func(), duration time.Duration) bool {
-	c := make(chan struct{})
-	go func() {
-		f()
-		c <- struct{}{}
-	}()
-
-	select {
-	case <-c:
-		return true
-	case <-time.After(duration):
+func (a *APIResource) getMsgQueueFlag(key string, queueConf *conf.Config) bool {
+	flagRaw := queueConf.Read(key, "QueueFlag")
+	if flagRaw == "" {
 		return false
 	}
+
+	flag, err := strconv.ParseBool(flagRaw)
+	if err != nil {
+		return false
+	}
+
+	blog.Infof("queueFlag is [%v]", flag)
+	return flag
+}
+
+func (a *APIResource) parseQueueInit(key string, queueConf *conf.Config) error {
+	queueFlag := a.getMsgQueueFlag(key, queueConf)
+	if !queueFlag {
+		a.msgQueue = &MessageQueue{
+			QueueFlag: queueFlag,
+			MsgQueue:  nil,
+		}
+
+		return nil
+	}
+
+	commonOptions, err := getQueueCommonOptions(key, queueConf)
+	if err != nil {
+		return err
+	}
+	commonOption := msgqueue.CommonOpts(commonOptions)
+
+	exchangeOption, err := getQueueExchangeOptions(key, queueConf)
+	if err != nil {
+		return err
+	}
+
+	natStreamingOption, err := getNatStreamingOptions(key, queueConf)
+	if err != nil {
+		return err
+	}
+
+	publishOption, err := getPublishOptions(key, queueConf)
+	if err != nil {
+		return err
+	}
+
+	subscribeOption, err := getQueueSubscribeOptions(key, queueConf)
+	if err != nil {
+		return err
+	}
+
+	msgQueue, err := msgqueue.NewMsgQueue(commonOption, exchangeOption, natStreamingOption, publishOption, subscribeOption)
+	if err != nil {
+		msgErr := fmt.Errorf("create queue failed, err %s", err.Error())
+		blog.Errorf("create queue failed, err %s", err.Error())
+		return msgErr
+	}
+	queueKind, _ := msgQueue.String()
+
+	a.msgQueue = &MessageQueue{
+		QueueFlag:       queueFlag,
+		MsgQueue:        msgQueue,
+		ResourceToQueue: commonOptions.ResourceToQueue,
+	}
+
+	blog.Infof("init queue[%s] successfully, sub queue[%v]", queueKind, a.msgQueue.ResourceToQueue)
+	return nil
+}
+
+// GetEventBus get event bus by key
+func (a *APIResource) GetEventBus(key string) *watchbus.EventBus {
+	return a.ebusMap[key]
+}
+
+// GetDBClient get db client by key
+func (a *APIResource) GetDBClient(key string) drivers.DB {
+	return a.dbMap[key]
+}
+
+// GetStoreClient get store client by keys
+func (a *APIResource) GetStoreClient(key string) store.Store {
+	return a.storeMap[key]
+}
+
+func (a *APIResource) parseMongodb(key string, dbConf *conf.Config) error {
+	address := dbConf.Read(key, "Addr")
+	timeoutRaw := dbConf.Read(key, "ConnectTimeout")
+	timeout, err := strconv.Atoi(timeoutRaw)
+	if err != nil {
+		return err
+	}
+	database := dbConf.Read(key, "Database")
+	username := dbConf.Read(key, "Username")
+	password := dbConf.Read(key, "Password")
+	maxPoolSizeRaw := dbConf.Read(key, "MaxPoolSize")
+	maxPoolSize := 0
+	if len(maxPoolSizeRaw) != 0 {
+		maxPoolSize, err = strconv.Atoi(maxPoolSizeRaw)
+		if err != nil {
+			return err
+		}
+	}
+	minPoolSizeRaw := dbConf.Read(key, "MinPoolSize")
+	minPoolSize := 0
+	if len(minPoolSizeRaw) != 0 {
+		minPoolSize, err = strconv.Atoi(minPoolSizeRaw)
+		if err != nil {
+			return err
+		}
+	}
+
+	if password != "" {
+		realPwd, _ := encrypt.DesDecryptFromBase([]byte(password))
+		password = string(realPwd)
+	}
+
+	mongoOptions := &mongo.Options{
+		Hosts:                 strings.Split(address, ","),
+		ConnectTimeoutSeconds: timeout,
+		Database:              database,
+		Username:              username,
+		Password:              password,
+		MaxPoolSize:           uint64(maxPoolSize),
+		MinPoolSize:           uint64(minPoolSize),
+	}
+
+	mongoDB, err := mongo.NewDB(mongoOptions)
+	if err != nil {
+		blog.Errorf("create mongo db with %s failed, err %s", key, err.Error())
+		return fmt.Errorf("create mongo db with %s failed, err %s", key, err.Error())
+	}
+	err = mongoDB.Ping()
+	if err != nil {
+		blog.Errorf("ping mongo db failed, err %s", err.Error())
+		return fmt.Errorf("ping mongo db failed, err %s", err.Error())
+	}
+
+	ignoreDeleteEventRaw := dbConf.Read(key, "IgnoreDeleteEvent")
+
+	ebus := watchbus.NewEventBus(mongoDB)
+	if ignoreDeleteEventRaw == "true" {
+		ebus.SetCondition(operator.NewBranchCondition(operator.Mat,
+			operator.NewLeafCondition(operator.Ne, operator.M{"operationType": "delete"})))
+	}
+	a.dbMap[key] = mongoDB
+	a.ebusMap[key] = ebus
+	blog.Infof("init mongo db with key %s successfully", key)
+	return nil
+}
+
+func (a *APIResource) parseZk(key string, dbConf *conf.Config) error {
+	address := dbConf.Read(key, "Addr")
+	timeoutRaw := dbConf.Read(key, "ConnectTimeout")
+	timeout, _ := strconv.Atoi(timeoutRaw)
+	database := dbConf.Read(key, "Database")
+	username := dbConf.Read(key, "Username")
+	password := dbConf.Read(key, "Password")
+
+	if password != "" {
+		realPwd, _ := encrypt.DesDecryptFromBase([]byte(password))
+		password = string(realPwd)
+	}
+
+	zkOpt := &zookeeper.Options{
+		BasePath:              database,
+		Addrs:                 strings.Split(address, ","),
+		ConnectTimeoutSeconds: timeout,
+		Database:              database,
+		Username:              username,
+		Password:              password,
+	}
+
+	zkStore, err := zookeeper.NewStore(zkOpt)
+	if err != nil {
+		return err
+	}
+	a.storeMap[key] = zkStore
+	blog.Infof("init zookeeper with key %s successfully", key)
+	return nil
 }

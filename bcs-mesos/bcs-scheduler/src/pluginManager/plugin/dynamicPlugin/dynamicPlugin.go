@@ -14,12 +14,13 @@
 package dynamicPlugin
 
 import (
-	typesplugin "bk-bcs/bcs-common/common/plugin"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/pluginManager/config"
-	bcsplugin "bk-bcs/bcs-mesos/bcs-scheduler/src/pluginManager/plugin"
 	"fmt"
 	"plugin"
 	"time"
+
+	typesplugin "github.com/Tencent/bk-bcs/bcs-common/common/plugin"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/pluginManager/config"
+	bcsplugin "github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/pluginManager/plugin"
 )
 
 type dynamicPlugin struct {
@@ -35,6 +36,7 @@ type dynamicPlugin struct {
 	getHostAttributes func(*typesplugin.HostPluginParameter) (map[string]*typesplugin.HostAttributes, error)
 }
 
+// NewDynamicPlugin loading plugin according configuration
 func NewDynamicPlugin(dir string, conf *config.PluginConfig) (bcsplugin.Plugin, error) {
 	p := &dynamicPlugin{
 		currentDir: dir,
@@ -99,6 +101,7 @@ func (p *dynamicPlugin) initPlugin() error {
 	return nil
 }
 
+// GetHostAttributes interface implementation
 func (p *dynamicPlugin) GetHostAttributes(para *typesplugin.HostPluginParameter) (map[string]*typesplugin.HostAttributes, error) {
 
 	if p.initErr != nil {
@@ -115,6 +118,7 @@ func (p *dynamicPlugin) GetHostAttributes(para *typesplugin.HostPluginParameter)
 	}()
 
 	ticker := time.NewTicker(time.Second * time.Duration(p.timeout))
+	defer ticker.Stop()
 
 	select {
 	case <-ticker.C:

@@ -15,42 +15,69 @@ package manager
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
-	//"sync"
-	"os"
-	//"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/apiserver"
-	//"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/ipam"
-	//"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/ns"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/schedcontext"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/util"
 
-	"bk-bcs/bcs-common/common/blog"
-	"bk-bcs/bcs-common/common/http/httpserver"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/common/http/httpserver"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/remote/alertmanager"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/schedcontext"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store/etcd"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store/zk"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/pluginManager"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/util"
 )
 
+// Mananger main body of scheduler
 type Manager struct {
-	store        *store.Store
 	sched        *sched.Sched
 	schedContext *schedcontext.SchedContext
 	config       util.SchedConfig
 }
 
+// New create Manager according config item
 func New(config util.SchedConfig) (*Manager, error) {
 	manager := &Manager{
 		config: config,
 	}
 
-	dbzk := store.NewDbZk(strings.Split(config.ZkHost, ","))
-	dbzk.Connect()
+	var s store.Store
+	var err error
+	var pm *pluginManager.PluginManager
+	if config.Scheduler.Plugins != "" {
+		blog.Infof("start init plugin manager")
+		plugins := strings.Split(config.Scheduler.Plugins, ",")
 
-	zkStore := store.NewManagerStore(dbzk)
+		pm, err = pluginManager.NewPluginManager(plugins, config.Scheduler.PluginDir)
+		if err != nil {
+			blog.Errorf("NewPluginManager error %s", err.Error())
+		}
+	}
+
+	if config.Scheduler.StoreDriver == "etcd" {
+		s, err = etcd.NewEtcdStore(config.Scheduler.Kubeconfig, pm, config.Scheduler.Cluster)
+		if err != nil {
+			blog.Errorf("new etcd store failed: %s", err.Error())
+			return nil, err
+		}
+		config.Scheduler.UseCache = true
+	} else {
+		dbzk := zk.NewDbZk(strings.Split(config.ZkHost, ","))
+		err = dbzk.Connect()
+		if err != nil {
+			blog.Errorf("connect zookeeper %s failed: %s", config.ZkHost, err.Error())
+			return nil, err
+		}
+		s = zk.NewManagerStore(dbzk, pm, config.Scheduler.Cluster)
+		config.Scheduler.UseCache = false
+	}
 
 	manager.schedContext = &schedcontext.SchedContext{
 		Config: config,
-		Store:  zkStore,
+		Store:  s,
 	}
 
 	listener := &manager.config.HttpListener
@@ -58,13 +85,13 @@ func New(config util.SchedConfig) (*Manager, error) {
 
 	splitID := strings.Split(listener.TCPAddr, ":")
 	if len(splitID) < 2 {
-		return nil, fmt.Errorf("listen adress %s format error", listener.TCPAddr)
+		return nil, fmt.Errorf("listen address %s format error", listener.TCPAddr)
 	}
 	ip := splitID[0]
 	port, err := strconv.Atoi(splitID[1])
 	if err != nil {
 		blog.Error("get port from %s error: %s", listener.TCPAddr, err.Error())
-		return nil, fmt.Errorf("listen adress %s format error", listener.TCPAddr)
+		return nil, fmt.Errorf("listen address %s format error", listener.TCPAddr)
 	}
 
 	manager.schedContext.ApiServer2 = httpserver.NewHttpServer(uint(port), ip, listener.UnixAddr)
@@ -79,6 +106,24 @@ func New(config util.SchedConfig) (*Manager, error) {
 		manager.schedContext.ApiServer2.SetSsl(listener.CAFile, listener.CertFile, listener.KeyFile, listener.CertPasswd)
 	}
 
+	if len(config.AlertManager.Server) != 0 {
+		alertClient, err := alertmanager.NewAlertManager(alertmanager.Options{
+			Server:     config.AlertManager.Server,
+			ClientAuth: config.AlertManager.ClientAuth,
+			Debug:      config.AlertManager.Debug,
+			Token:      config.AlertManager.Token,
+		})
+		if err != nil {
+			blog.Errorf("NewAlertManager failed: %v", err)
+			return nil, err
+		}
+		blog.Infof("alertmanager init successful")
+		manager.schedContext.AlertManager = alertClient
+	} else {
+		blog.Warnf("alertmanager server address is empty, alertmanager is disabled")
+	}
+	
+
 	manager.config.Scheduler.Address = listener.TCPAddr
 	manager.config.Scheduler.ZK = config.ZkHost
 	manager.sched = sched.New(manager.config.Scheduler, manager.schedContext)
@@ -88,10 +133,12 @@ func New(config util.SchedConfig) (*Manager, error) {
 	return manager, nil
 }
 
+// Stop stop manager
 func (manager *Manager) Stop() error {
 	return nil
 }
 
+// Start entry point of bcs-scheduler
 func (manager *Manager) Start() error {
 
 	err := manager.sched.Start()

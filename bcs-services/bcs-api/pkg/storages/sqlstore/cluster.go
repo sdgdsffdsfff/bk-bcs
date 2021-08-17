@@ -14,7 +14,7 @@
 package sqlstore
 
 import (
-	m "bk-bcs/bcs-services/bcs-api/pkg/models"
+	m "github.com/Tencent/bk-bcs/bcs-services/bcs-api/pkg/models"
 	"strings"
 
 	"github.com/dchest/uniuri"
@@ -66,11 +66,5 @@ func CreateCluster(cluster *m.Cluster) error {
 		cluster.Identifier = strings.ToLower(cluster.ID) + "-" + uniuri.NewLen(16)
 	}
 	err := GCoreDB.Create(cluster).Error
-	return err
-}
-
-// UpdateClusterAdmin activate or deactivate a cluster's turn_on_admin attr
-func UpdateClusterAdmin(cluster *m.Cluster, isActive bool) error {
-	err := GCoreDB.Model(cluster).Update("turn_on_admin", isActive).Error
 	return err
 }

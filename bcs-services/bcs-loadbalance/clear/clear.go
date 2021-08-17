@@ -19,7 +19,7 @@ import (
 	"sort"
 	"time"
 
-	"bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
 )
 
 type fileInfo []os.FileInfo
@@ -60,6 +60,7 @@ func (cm *Manager) Start() {
 //and cacth the signal to exit
 func (cm *Manager) run() {
 	tick := time.NewTicker(time.Second * time.Duration(int64(120)))
+	defer tick.Stop()
 	for {
 		select {
 		case <-cm.exit:

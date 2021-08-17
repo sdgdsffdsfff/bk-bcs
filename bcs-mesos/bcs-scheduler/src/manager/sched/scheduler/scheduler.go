@@ -14,54 +14,66 @@
 package scheduler
 
 import (
-	rd "bk-bcs/bcs-common/common/RegisterDiscover"
-	"bk-bcs/bcs-common/common/blog"
-	commtype "bk-bcs/bcs-common/common/types"
-	"bk-bcs/bcs-common/common/version"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/client"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/misc"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/offer"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/operator"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/task"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/mesosproto/mesos"
-	sched "bk-bcs/bcs-mesos/bcs-scheduler/src/mesosproto/sched"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/pluginManager"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/types"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/util"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/andygrunwald/megos"
-	"github.com/golang/protobuf/proto"
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	alarm "bk-bcs/bcs-common/common/bcs-health/api"
-	"bk-bcs/bcs-common/common/metric"
-	typesplugin "bk-bcs/bcs-common/common/plugin"
-	"bk-bcs/bcs-common/common/static"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/servermetric"
-	"reflect"
+	rd "github.com/Tencent/bk-bcs/bcs-common/common/RegisterDiscover"
+	alarm "github.com/Tencent/bk-bcs/bcs-common/common/bcs-health/api"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-common/common/metric"
+	typesplugin "github.com/Tencent/bk-bcs/bcs-common/common/plugin"
+	"github.com/Tencent/bk-bcs/bcs-common/common/static"
+	commtype "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/common/version"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/mesosproto/mesos"
+	master "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/mesosproto/mesos/master"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/mesosproto/sched"
+	types "github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/remote/alertmanager"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/client"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/misc"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/offer"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/operator"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/servermetric"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/task"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/pluginManager"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/util"
 
-	master "bk-bcs/bcs-mesos/bcs-scheduler/src/mesosproto/mesos/master"
-	"github.com/samuel/go-zookeeper/zk"
+	"github.com/andygrunwald/megos"
+	"github.com/golang/protobuf/proto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
 )
 
-// Interval for update task, taskgroup, application in ZK
+// MAX_DATA_UPDATE_INTERVAL Interval for update task, taskgroup, application in ZK
 const MAX_DATA_UPDATE_INTERVAL = 180
 
-// Interval for checking ZK data
-const DATA_CHECK_INTERVAL = 60
+// DATA_CHECK_INTERVAL Interval for checking ZK data
+const DATA_CHECK_INTERVAL = 1200
 
-// HeartBeat timeout between scheduler and mesos master
+// MESOS_HEARTBEAT_TIMEOUT HeartBeat timeout between scheduler and mesos master
 const MESOS_HEARTBEAT_TIMEOUT = 120
 
-const MAX_STAGING_UPDATE_INTERVAL = 120
+// MAX_STAGING_UPDATE_INTERVAL max interval for staging
+const MAX_STAGING_UPDATE_INTERVAL = 180
+
+const (
+	SchedulerRoleMaster = "master"
+	SchedulerRoleSlave  = "slave"
+)
 
 // Scheduler represents a Mesos scheduler
 type Scheduler struct {
@@ -115,28 +127,35 @@ type Scheduler struct {
 	offerPool offer.OfferPool
 
 	pluginManager *pluginManager.PluginManager
+
+	// alert interface
+	alertManager alertmanager.AlertManageInterface
+	//stop daemonset signal
+	stopDaemonset chan struct{}
+
+	// queue for scheduler transaction
+	transactionQueue workqueue.RateLimitingInterface
 }
 
 // NewScheduler returns a pointer to new Scheduler
-func NewScheduler(config util.Scheduler, store store.Store) *Scheduler {
+func NewScheduler(config util.Scheduler, store store.Store, alert alertmanager.AlertManageInterface) *Scheduler {
 	s := &Scheduler{
 		config:       config,
 		store:        store,
+		alertManager: alert,
 		eventManager: newBcsEventManager(config),
 		lostSlave:    make(map[string]int64),
 	}
 
-	para := &offer.OfferPara{Sched: s}
+	para := &offer.OfferPara{Sched: s, Store: store}
 	s.offerPool = offer.NewOfferPool(para)
-
-	//if config.ClientCertDir != "" {
 	s.clientCert = &commtype.CertConfig{
 		CertFile:   config.ClientCertFile,
 		KeyFile:    config.ClientKeyFile,
 		CAFile:     config.ClientCAFile,
 		CertPasswd: static.ClientCertPwd,
 	}
-	//}
+
 	//init executor info
 	task.InitExecutorInfo(s.config.ContainerExecutor, s.config.ProcessExecutor, s.config.CniDir, s.config.NetImage)
 
@@ -144,6 +163,7 @@ func NewScheduler(config util.Scheduler, store store.Store) *Scheduler {
 
 	s.store.InitLockPool()
 	s.store.InitDeploymentLockPool()
+	s.store.InitCmdLockPool()
 
 	// TODO, the follow statements are only used for passing test,
 	// should resovled to make sure test pass
@@ -163,6 +183,13 @@ func NewScheduler(config util.Scheduler, store store.Store) *Scheduler {
 	}
 
 	return s
+}
+
+func (s *Scheduler) runPrometheusMetrics() {
+	http.Handle("/metrics", promhttp.Handler())
+	addr := s.IP + ":" + strconv.Itoa(int(s.config.MetricPort))
+	blog.Infof("scheduler listen metrics %s", addr)
+	go http.ListenAndServe(addr, nil)
 }
 
 func (s *Scheduler) runMetric() {
@@ -208,7 +235,7 @@ func (s *Scheduler) unlockService() {
 	s.serviceLock.Unlock()
 }
 
-// start starts the scheduler and subscribes to event stream
+// Start start starts the scheduler and subscribes to event stream
 func (s *Scheduler) Start() error {
 	if s.config.Cluster == "" {
 		blog.Errorf("scheduler cluster unknown")
@@ -217,38 +244,16 @@ func (s *Scheduler) Start() error {
 	blog.Info("scheduler run for cluster %s", s.config.Cluster)
 	s.BcsClusterId = s.config.Cluster
 
-	var alarmConfig alarm.TLSConfig
-	//if s.config.ClientCertDir == "" {
-	//	s.config.ClientCertDir = "./cert"
-	//}
-	alarmConfig.CaFile = s.config.ClientCAFile
-	alarmConfig.CertFile = s.config.ClientCertFile
-	alarmConfig.KeyFile = s.config.ClientKeyFile
-	//alarmConfig.PassWord = static.ClientCertPwd
-	blog.Info("NewBcsHealth with %s, %s, %s, %s",
-		s.config.BcsZK, alarmConfig.CaFile, alarmConfig.CertFile, alarmConfig.KeyFile)
-	err := alarm.NewBcsHealth(s.config.BcsZK, alarmConfig)
-	if err != nil {
-		blog.Error("NewBcsHealth err:%s", err.Error())
-		return err
-	}
-
-	s.ServiceMgr = NewServiceMgr(s.config.ZK, "/blueking", s)
+	s.ServiceMgr = NewServiceMgr(s)
 	if s.ServiceMgr == nil {
 		return fmt.Errorf("new serviceMgr(%s:/blueking) error", s.config.ZK)
 	}
 	go s.ServiceMgr.Worker()
 
-	//blog.Info("to create transaction manager")
-	//s.TransMgr, _ = CreateTransactionMgr(s)
-	//blog.Info("to create transaction manage goroutine")
-	//go TransManage(s.TransMgr)
-	//blog.Info("after creating transaction manage goroutine")
-
 	// get Host and Port
 	splitID := strings.Split(s.config.Address, ":")
 	if len(splitID) < 2 {
-		return fmt.Errorf("listen adress %s format error", s.config.Address)
+		return fmt.Errorf("listen address %s format error", s.config.Address)
 	}
 	s.IP = splitID[0]
 	port, err := strconv.Atoi(splitID[1])
@@ -258,7 +263,8 @@ func (s *Scheduler) Start() error {
 	s.Port = port
 	blog.Info("scheduler run address(%s:%d)", s.IP, s.Port)
 
-	s.runMetric()
+	s.runPrometheusMetrics()
+	//s.runMetric()
 
 	s.Role = "unknown"
 	s.currMesosMaster = ""
@@ -286,26 +292,26 @@ func createOrLoadFrameworkInfo(config util.Scheduler, store store.Store) (*mesos
 		FailoverTimeout: proto.Float64(60 * 60 * 24 * 7),
 		Checkpoint:      proto.Bool(true),
 		Capabilities: []*mesos.FrameworkInfo_Capability{
-			&mesos.FrameworkInfo_Capability{
+			{
 				Type: mesos.FrameworkInfo_Capability_PARTITION_AWARE.Enum(),
 			},
 		},
 	}
 
-	frameworkId, err := store.FetchFrameworkID()
+	frameworkID, err := store.FetchFrameworkID()
 	if err != nil {
-		if strings.ToLower(err.Error()) != "zk: node does not exist" {
+		if strings.ToLower(err.Error()) != "zk: node does not exist" && !strings.Contains(err.Error(), "not found") {
 			blog.Error("Fetch framework id failed: %s", err.Error())
 			return nil, err
 		}
 
 		blog.Warn("Fetch framework id failed: %s, will create a new framework", err.Error())
-		frameworkId = ""
+		frameworkID = ""
 	}
-	blog.Info("fetch frameworkId %s from DB", frameworkId)
-	if frameworkId != "" {
+	blog.Info("fetch frameworkId %s from DB", frameworkID)
+	if frameworkID != "" {
 		fw.Id = &mesos.FrameworkID{
-			Value: proto.String(frameworkId),
+			Value: proto.String(frameworkID),
 		}
 	}
 
@@ -347,6 +353,7 @@ func (s *Scheduler) discvMesos() {
 	blog.Info("watch mesos master under (%s: %s)", MesosDiscv, discvPath)
 
 	tick := time.NewTicker(120 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		//case <-rdCxt.Done():
@@ -356,7 +363,7 @@ func (s *Scheduler) discvMesos() {
 		case <-tick.C:
 			blog.Info("mesos discove(%s:%s), curr mesos master:%s", MesosDiscv, discvPath, s.currMesosMaster)
 			// add mesos heartbeat check
-			if s.Role == "master" {
+			if s.Role == SchedulerRoleMaster {
 				s.lockService()
 				heartbeat := s.mesosHeartBeatTime
 				now := time.Now().Unix()
@@ -446,7 +453,7 @@ func (s *Scheduler) checkMesosChange(currMaster, MasterID string) error {
 	s.mesosMasterID = MasterID
 	servermetric.SetMesosMaster(s.currMesosMaster)
 
-	if s.Role != "master" {
+	if s.Role != SchedulerRoleMaster {
 		blog.Info("mesos master leader changed to %s, but scheduler's role is %s, do nothing", currMaster, s.Role)
 		return nil
 	}
@@ -458,13 +465,6 @@ func (s *Scheduler) checkMesosChange(currMaster, MasterID string) error {
 		blog.Info("close current http ...")
 		s.currMesosResp.Body.Close()
 		s.currMesosResp = nil
-	}
-	if s.oprMgr != nil {
-		blog.Info("close current operator manager ...")
-		var msgOp operator.OperatorMsg
-		msgOp.MsgType = "stop"
-		s.oprMgr.SendMsg(&msgOp)
-		s.oprMgr = nil
 	}
 	time.Sleep(3 * time.Second)
 
@@ -491,22 +491,6 @@ func (s *Scheduler) checkMesosChange(currMaster, MasterID string) error {
 		return fmt.Errorf("subscribe mesos master(%s) err:%s ", state.Leader, err.Error())
 	}
 	blog.Info("subscribe to mesos master(%s) succ", state.Leader)
-
-	if s.oprMgr == nil {
-		// create operator manager
-		blog.Info("to create operator manager")
-		s.operatorClient = client.New(state.Leader, "/api/v1")
-		s.oprMgr, _ = operator.CreateOperatorMgr(s.store, s.operatorClient)
-		blog.Info("to create operator manage goroutine")
-		go func() {
-			operator.OperatorManage(s.oprMgr)
-		}()
-		var msgOp operator.OperatorMsg
-		msgOp.MsgType = "opencheck"
-		s.oprMgr.SendMsg(&msgOp)
-		blog.Info("after create operator manage goroutine")
-	}
-
 	if s.dataChecker == nil {
 		blog.Info("to create data checker")
 		s.dataChecker, _ = CreateDataCheckMgr(s.store, s)
@@ -597,6 +581,7 @@ func (s *Scheduler) regDiscove() {
 	blog.Info("scheduler DiscoverService(%s:%s) succ", s.config.RegDiscvSvr, discvPath)
 
 	tick := time.NewTicker(180 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-tick.C:
@@ -638,10 +623,10 @@ func (s *Scheduler) regDiscove() {
 				return
 			}
 			if isMaster {
-				err = s.checkRoleChange("master")
+				err = s.checkRoleChange(SchedulerRoleMaster)
 				servermetric.SetRole(metric.MasterRole)
 			} else {
-				err = s.checkRoleChange("slave")
+				err = s.checkRoleChange(SchedulerRoleSlave)
 				servermetric.SetRole(metric.SlaveRole)
 			}
 			if err != nil {
@@ -727,6 +712,7 @@ func (s *Scheduler) registerBCS() {
 	blog.Info("BCS register discove path(%s) succ", discvPath)
 
 	tick := time.NewTicker(180 * time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-tick.C:
@@ -775,8 +761,7 @@ func (s *Scheduler) checkRoleChange(currRole string) error {
 	}
 
 	blog.Info("scheduler role change: %s --> %s", s.Role, currRole)
-	s.Role = currRole
-	if s.Role != "master" {
+	if currRole != SchedulerRoleMaster {
 		if s.currMesosResp != nil {
 			blog.Info("close current http ...")
 			s.currMesosResp.Body.Close()
@@ -803,16 +788,30 @@ func (s *Scheduler) checkRoleChange(currRole string) error {
 			s.dataChecker.SendMsg(&msg)
 			blog.Info("after close data check goroutine")
 		}
-
+		//s.store.StopStoreMetrics()
 		s.store.UnInitCacheMgr()
-
+		//stop check and build daemonset
+		s.stopBuildDaemonset()
+		// stop transaction loop
+		s.stopTransactionLoop()
 		return nil
 	}
-
-	s.store.InitCacheMgr(s.config.UseCache)
-
+	//init cache
+	err := s.store.InitCacheMgr(s.config.UseCache)
+	if err != nil {
+		blog.Errorf("InitCacheMgr failed: %s, and exit", err.Error())
+		os.Exit(1)
+	}
+	//sync agent pods index
+	err = s.syncAgentsettingPods()
+	if err != nil {
+		blog.Errorf("syncAgentsettingPods failed: %s, and exit", err.Error())
+		os.Exit(1)
+	}
+	//current role is master
+	s.Role = currRole
+	go s.store.StartStoreObjectMetrics()
 	go s.startCheckDeployments()
-
 	if s.ServiceMgr != nil {
 		var msgOpen ServiceMgrMsg
 		msgOpen.MsgType = "open"
@@ -854,14 +853,10 @@ func (s *Scheduler) checkRoleChange(currRole string) error {
 		blog.Info("to create operator manager")
 		s.operatorClient = client.New(state.Leader, "/api/v1")
 		s.oprMgr, _ = operator.CreateOperatorMgr(s.store, s.operatorClient)
-		blog.Info("to create operator manage goroutine")
-		go func() {
-			operator.OperatorManage(s.oprMgr)
-		}()
-		var msgOp operator.OperatorMsg
-		msgOp.MsgType = "opencheck"
-		s.oprMgr.SendMsg(&msgOp)
-		blog.Info("after create operator manage goroutine")
+		go operator.OperatorManage(s.oprMgr)
+		s.oprMgr.SendMsg(&operator.OperatorMsg{
+			MsgType: "opencheck",
+		})
 	}
 
 	if s.dataChecker == nil {
@@ -878,6 +873,10 @@ func (s *Scheduler) checkRoleChange(currRole string) error {
 		s.dataChecker.SendMsg(&msg)
 		blog.Info("after open data checker")
 	}
+	//start check and build daemonset
+	go s.startBuildDaemonsets()
+	// start transaction loop
+	s.startTransactionLoop()
 
 	return nil
 
@@ -886,15 +885,73 @@ func (s *Scheduler) checkRoleChange(currRole string) error {
 func stateFromMasters(masters []string) (*megos.State, error) {
 	masterUrls := make([]*url.URL, 0)
 	for _, master := range masters {
-		masterUrl, _ := url.Parse(fmt.Sprintf("http://%s", master))
-		blog.Info("mesos master Url: %s", masterUrl)
-		masterUrls = append(masterUrls, masterUrl)
+		masterURL, _ := url.Parse(fmt.Sprintf("http://%s", master))
+		blog.Info("mesos master Url: %s", masterURL)
+		masterUrls = append(masterUrls, masterURL)
 	}
 
 	mesosClient := megos.NewClient(masterUrls, nil)
 	return mesosClient.GetStateFromCluster()
 }
 
+// UpdateMesosAgents update mesos info
+func (s *Scheduler) UpdateMesosAgents() {
+	s.oprMgr.UpdateMesosAgents()
+}
+
+//for build pod index in agent
+func (s *Scheduler) syncAgentsettingPods() error {
+	taskg, err := s.store.ListClusterTaskgroups()
+	if err != nil {
+		blog.Infof("ListClusterTaskgroups failed: %s", err.Error())
+		return err
+	}
+	//empty agentsetting pods
+	settings, err := s.store.ListAgentsettings()
+	if err != nil {
+		blog.Errorf("ListAgentsettings failed: %s", err.Error())
+		return err
+	}
+	for _, setting := range settings {
+		setting.Pods = make([]string, 0)
+		err = s.store.SaveAgentSetting(setting)
+		if err != nil {
+			blog.Errorf("SaveAgentSetting %s failed: %s", setting.InnerIP, err.Error())
+			return err
+		}
+	}
+
+	//save agentsetting pods
+	for _, taskgroup := range taskg {
+		nodeIP := taskgroup.GetAgentIp()
+		if nodeIP == "" {
+			blog.Errorf("taskgroup %s GetAgentIp failed.", taskgroup.ID)
+			continue
+		}
+
+		setting, err := s.store.FetchAgentSetting(nodeIP)
+		if err != nil {
+			blog.Errorf("FetchAgentSetting %s failed: %s", nodeIP, err.Error())
+			return err
+		}
+		if setting == nil {
+			setting = &commtype.BcsClusterAgentSetting{
+				InnerIP: nodeIP,
+				Pods:    make([]string, 0),
+			}
+		}
+		setting.Pods = append(setting.Pods, taskgroup.ID)
+		err = s.store.SaveAgentSetting(setting)
+		if err != nil {
+			blog.Errorf("SaveAgentSetting %s failed: %s", setting.InnerIP, err.Error())
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Stop stop whole scheduler
 func (s *Scheduler) Stop() {
 	blog.Info("scheduler Stop ...")
 }
@@ -978,7 +1035,8 @@ func (s *Scheduler) handleEvents(resp *http.Response) {
 				blog.V(3).Infof("mesos report offer %s", string(by))
 
 				cpus, mem, disk := s.OfferedResources(offer)
-				blog.Infof("mesos report offer %s||%s: cpu(%f) mem(%f) disk(%f)", offer.GetHostname(), *(offer.Id.Value), cpus, mem, disk)
+				blog.Infof("mesos report offer %s||%s: cpu(%f) mem(%f) disk(%f)",
+					offer.GetHostname(), *(offer.Id.Value), cpus, mem, disk)
 			}
 			s.offerPool.AddOffers(event.Offers.Offers)
 
@@ -993,11 +1051,10 @@ func (s *Scheduler) handleEvents(resp *http.Response) {
 			}()
 
 		case sched.Event_MESSAGE:
-			blog.Info("mesos report message event")
 			message := event.GetMessage()
-			blog.Info("receive message(%s)", message.String())
+			blog.V(3).Infof("receive message(%s)", message.String())
 			data := message.GetData()
-			var bcsMsg types.BcsMessage
+			var bcsMsg *types.BcsMessage
 			err := json.Unmarshal(data, &bcsMsg)
 			if err != nil {
 				blog.Error("unmarshal bcsmessage(%s) err:%s", data, err.Error())
@@ -1005,7 +1062,9 @@ func (s *Scheduler) handleEvents(resp *http.Response) {
 			}
 			switch *bcsMsg.Type {
 			case types.Msg_Res_COMMAND_TASK:
-				go s.ProcessCommandMessage(&bcsMsg)
+				go s.ProcessCommandMessage(bcsMsg)
+			case types.Msg_TASK_STATUS_UPDATE:
+				go s.UpdateTaskStatus(message.GetAgentId().GetValue(), message.GetExecutorId().GetValue(), bcsMsg)
 			default:
 				blog.Error("unknown message type(%s)", *bcsMsg.Type)
 			}
@@ -1038,13 +1097,14 @@ func (s *Scheduler) handleEvents(resp *http.Response) {
 	}
 }
 
-// Send health message
-func (s *Scheduler) SendHealthMsg(kind alarm.MessageKind, RunAs, message string, alarmID string, convergenceSeconds *uint16) {
-
+// SendHealthMsg Send health message
+func (s *Scheduler) SendHealthMsg(
+	kind alarm.MessageKind, runAs, message string, alarmID string, convergenceSeconds *uint16) {
 	if convergenceSeconds == nil {
-		blog.Warn("send health message(%s): ns(%s), alarmID(%s) ", message, RunAs, alarmID)
+		blog.Warn("send health message(%s): ns(%s), alarmID(%s) ", message, runAs, alarmID)
 	} else {
-		blog.Warn("send health message(%s): ns(%s), alarmID(%s), convergenceSeconds(%d)", message, RunAs, alarmID, *convergenceSeconds)
+		blog.Warn("send health message(%s): ns(%s), alarmID(%s), convergenceSeconds(%d)",
+			message, runAs, alarmID, *convergenceSeconds)
 	}
 
 	currentTime := time.Now().Local()
@@ -1058,14 +1118,32 @@ func (s *Scheduler) SendHealthMsg(kind alarm.MessageKind, RunAs, message string,
 
 		IP:         s.IP,
 		ClusterID:  s.BcsClusterId,
-		Namespace:  RunAs,
+		Namespace:  runAs,
 		Message:    message,
 		Version:    version.GetVersion(),
 		ReportTime: currentTime.Format("2006-01-02 15:04:05.000"),
 	}
 
-	if err := alarm.SendHealthInfo(&health); nil != err {
-		blog.Warn("send health message(%s) err:%s", message, err.Error())
+	if s.alertManager != nil {
+		err := s.alertManager.CreateAlertInfoToAlertManager(&alertmanager.CreateBusinessAlertInfoReq{
+			Starttime:    time.Now().Unix(),
+			Generatorurl: "",
+			AlarmType:    "module",
+			ClusterID:    s.ClusterId,
+			AlertAnnotation: &alertmanager.AlertAnnotation{
+				Message: message,
+				Comment: "",
+			},
+			ModuleAlertLabel: &alertmanager.ModuleAlertLabel{
+				ModuleName: health.Module,
+				ModuleIP:   s.IP,
+				AlarmName:  health.AlarmName,
+				AlarmLevel: string(kind),
+			},
+		}, time.Second*10)
+		if err != nil {
+			blog.Warn("CreateBusinessAlertInfo send health message(%s) failed: err[%v]", message, err)
+		}
 	}
 
 	return
@@ -1089,7 +1167,8 @@ func (s *Scheduler) produceEvent(object interface{}) error {
 		return fmt.Errorf("object type %s is invalid", btype.Name())
 	}
 
-	return s.eventManager.syncEvent(event)
+	go s.eventManager.syncEvent(event)
+	return nil
 }
 
 func (s *Scheduler) newTaskEvent(task *types.Task) *commtype.BcsStorageEventIf {
@@ -1107,6 +1186,18 @@ func (s *Scheduler) newTaskEvent(task *types.Task) *commtype.BcsStorageEventIf {
 			Name:      task.AppId,
 			Kind:      commtype.ApplicationExtraKind,
 		},
+		Data: &v1.Event{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      task.AppId,
+				Namespace: task.RunAs,
+			},
+			InvolvedObject: v1.ObjectReference{
+				Kind:      string(commtype.ApplicationExtraKind),
+				Namespace: task.RunAs,
+				Name:      task.AppId,
+			},
+			Message: task.Message,
+		},
 	}
 
 	if task.Status == types.TASK_STATUS_ERROR || task.Status == types.TASK_STATUS_FAIL ||
@@ -1117,6 +1208,18 @@ func (s *Scheduler) newTaskEvent(task *types.Task) *commtype.BcsStorageEventIf {
 	}
 
 	return event
+}
+
+// PushTransaction push transaction into queue
+func (s *Scheduler) PushEventQueue(transaction *types.Transaction) {
+	if s.transactionQueue != nil {
+		nsName := k8stypes.NamespacedName{
+			Namespace: transaction.Namespace,
+			Name:      transaction.TransactionID,
+		}
+		s.transactionQueue.Forget(nsName)
+		s.transactionQueue.Add(nsName)
+	}
 }
 
 // DeclineResource is used to send DECLINE request to mesos to release offer. This
@@ -1140,7 +1243,7 @@ func (s *Scheduler) DeclineResource(offerId *string) (*http.Response, error) {
 	return s.send(call)
 }
 
-// Decline offer from mesos master
+// DeclineOffers Decline offer from mesos master
 func (s *Scheduler) DeclineOffers(offers []*mesos.Offer) error {
 	for _, offer := range offers {
 		_, err := s.DeclineResource(offer.Id.Value)
@@ -1153,7 +1256,7 @@ func (s *Scheduler) DeclineOffers(offers []*mesos.Offer) error {
 	return nil
 }
 
-// Get offered resource from mesos master
+// OfferedResources Get offered resource from mesos master
 func (s *Scheduler) OfferedResources(offer *mesos.Offer) (cpus, mem, disk float64) {
 	for _, res := range offer.GetResources() {
 		if res.GetName() == "cpus" {
@@ -1170,7 +1273,7 @@ func (s *Scheduler) OfferedResources(offer *mesos.Offer) (cpus, mem, disk float6
 	return
 }
 
-// Get agent attributes
+// GetHostAttributes Get agent attributes
 func (s *Scheduler) GetHostAttributes(para *typesplugin.HostPluginParameter) (map[string]*typesplugin.HostAttributes, error) {
 	if s.pluginManager == nil {
 		return nil, fmt.Errorf("pluginManager is nil")
@@ -1179,12 +1282,12 @@ func (s *Scheduler) GetHostAttributes(para *typesplugin.HostPluginParameter) (ma
 	return s.pluginManager.GetHostAttributes(para)
 }
 
-// Get agent setting by IP
+// FetchAgentSetting Get agent setting by IP
 func (s *Scheduler) FetchAgentSetting(ip string) (*commtype.BcsClusterAgentSetting, error) {
 	return s.store.FetchAgentSetting(ip)
 }
 
-// Get agent schedInfo by hostname
+// FetchAgentSchedInfo Get agent schedInfo by hostname
 func (s *Scheduler) FetchAgentSchedInfo(hostname string) (*types.AgentSchedInfo, error) {
 	s.agentSchedInofLock.RLock()
 	defer s.agentSchedInofLock.RUnlock()
@@ -1192,20 +1295,21 @@ func (s *Scheduler) FetchAgentSchedInfo(hostname string) (*types.AgentSchedInfo,
 	return s.store.FetchAgentSchedInfo(hostname)
 }
 
-// Update agent schedinfo by hostname
+// UpdateAgentSchedInfo Update agent schedinfo by hostname
 func (s *Scheduler) UpdateAgentSchedInfo(hostname, taskGroupID string, deltaResource *types.Resource) error {
 	s.agentSchedInofLock.Lock()
 	defer s.agentSchedInofLock.Unlock()
 
 	agent, err := s.store.FetchAgentSchedInfo(hostname)
-	if err != nil {
+	if err != nil && !errors.Is(err, store.ErrNoFound) {
 		blog.Errorf("get host(%s) schedinfo err(%s)", hostname, err.Error())
 		return err
 	}
 
 	if agent == nil {
 		if deltaResource == nil {
-			blog.V(3).Infof("get host(%s) schedinfo return empty when delete taskgroup(%s) delta resource", hostname, taskGroupID)
+			blog.V(3).Infof("get host(%s) schedinfo return empty when delete taskgroup(%s) delta resource",
+				hostname, taskGroupID)
 			return nil
 		}
 
@@ -1223,18 +1327,18 @@ func (s *Scheduler) UpdateAgentSchedInfo(hostname, taskGroupID string, deltaReso
 		agent.Taskgroups = make(map[string]*types.Resource)
 	}
 
-	//delete taskgroup delta info
+	// delete taskgroup delta info
 	if deltaResource == nil {
 		blog.Infof("delete taskgroup(%s) from host(%s) schedinfo", taskGroupID, hostname)
 		delete(agent.Taskgroups, taskGroupID)
 	} else {
-		//add or update taskgroup delta info
+		// add or update taskgroup delta info
 		blog.Infof("set taskgroup(%s)(delta: %f | %f | %f) in host(%s) schedinfo list",
 			taskGroupID, deltaResource.Cpus, deltaResource.Mem, deltaResource.Disk, hostname)
 		agent.Taskgroups[taskGroupID] = deltaResource
 	}
 
-	//computer total delta resource for agent
+	// computer total delta resource for agent
 	agent.DeltaCPU = 0
 	agent.DeltaMem = 0
 	agent.DeltaDisk = 0
@@ -1257,37 +1361,32 @@ func (s *Scheduler) UpdateAgentSchedInfo(hostname, taskGroupID string, deltaReso
 	return nil
 }
 
-// Get Cluster ID
+// GetClusterId Get Cluster ID
 func (s *Scheduler) GetClusterId() string {
 	return s.BcsClusterId
 }
 
-// Get current first offer from pool
+// GetFirstOffer Get current first offer from pool
 func (s *Scheduler) GetFirstOffer() *offer.Offer {
 	return s.offerPool.GetFirstOffer()
 }
 
-// Get next offer from pool
+// GetNextOffer Get next offer from pool
 func (s *Scheduler) GetNextOffer(offer *offer.Offer) *offer.Offer {
 	return s.offerPool.GetNextOffer(offer)
 }
 
-// Get current all offers
+// GetAllOffers Get current all offers
 func (s *Scheduler) GetAllOffers() []*offer.Offer {
 	return s.offerPool.GetAllOffers()
 }
 
-// Get the first offer which ID is large the id
-/*func (s *Scheduler) GetOfferGreaterThan(id int64) *offer.Offer {
-	return s.offerPool.GetOfferGreaterThan(id)
-}*/
-
-// Use offer
+// UseOffer Use offer
 func (s *Scheduler) UseOffer(o *offer.Offer) bool {
 	return s.offerPool.UseOffer(o)
 }
 
-// Get cluster resources
+// GetClusterResource Get cluster resources
 func (s *Scheduler) GetClusterResource() (*commtype.BcsClusterResource, error) {
 
 	blog.Info("get cluster resource from mesos master")
@@ -1299,7 +1398,7 @@ func (s *Scheduler) GetClusterResource() (*commtype.BcsClusterResource, error) {
 	return s.GetMesosResourceIn(s.operatorClient)
 }
 
-// Get cluster current resource information from mesos master
+// GetMesosResourceIn Get cluster current resource information from mesos master
 func (s *Scheduler) GetMesosResourceIn(mesosClient *client.Client) (*commtype.BcsClusterResource, error) {
 
 	if mesosClient == nil {
@@ -1415,7 +1514,7 @@ func (s *Scheduler) GetMesosResourceIn(mesosClient *client.Client) (*commtype.Bc
 		agent.HostAttributes = mesosAttribute2commonAttribute(oneAgent.AgentInfo.Attributes)
 		agent.Attributes = agent.HostAttributes
 		settings, err := s.FetchAgentSetting(agent.IP)
-		if err != nil && err != zk.ErrNoNode {
+		if err != nil && err != store.ErrNoFound {
 			blog.Errorf("get cluster resource: query ageng settings failed IP(%s): %v", agent.IP, err)
 			return nil, err
 		}
@@ -1467,17 +1566,25 @@ func (s *Scheduler) GetMesosResourceIn(mesosClient *client.Client) (*commtype.Bc
 	return clusterRes, nil
 }
 
-func (s *Scheduler) GetCurrentOffers() []*mesos.Offer {
+// GetCurrentOffers get all offers from offer pool
+func (s *Scheduler) GetCurrentOffers() []*types.OfferWithDelta {
 	offers := s.offerPool.GetAllOffers()
 
-	inOffers := make([]*mesos.Offer, 0)
+	inOffers := make([]*types.OfferWithDelta, 0)
 	for _, o := range offers {
-		inOffers = append(inOffers, o.Offer)
+		inOffers = append(inOffers, &types.OfferWithDelta{
+			Offer: o.Offer,
+			DeltaResource: &types.Resource{
+				Cpus: o.DeltaCPU,
+				Mem:  o.DeltaMem,
+				Disk: o.DeltaDisk,
+			},
+		})
 	}
-
 	return inOffers
 }
 
+//convert mesos.Attribute to commtype.BcsAgentAttribute
 func mesosAttribute2commonAttribute(oldAttributeList []*mesos.Attribute) []*commtype.BcsAgentAttribute {
 	if oldAttributeList == nil {
 		return nil
@@ -1537,4 +1644,28 @@ func mesosAttribute2commonAttribute(oldAttributeList []*mesos.Attribute) []*comm
 		attributeList = append(attributeList, attribute)
 	}
 	return attributeList
+}
+
+// FetchTaskGroup get taskgroup from taskID
+func (s *Scheduler) FetchTaskGroup(taskGroupID string) (*types.TaskGroup, error) {
+	return s.store.FetchTaskGroup(taskGroupID)
+}
+
+//CheckPodBelongDaemonset check taskgroup whether belongs to daemonset
+func (s *Scheduler) CheckPodBelongDaemonset(taskgroupID string) bool {
+	namespace, name := types.GetRunAsAndAppIDbyTaskGroupID(taskgroupID)
+	version, err := s.store.GetVersion(namespace, name)
+	if err != nil {
+		blog.Errorf("Fetch taskgroup(%s) version(%s.%s) error %s", taskgroupID, namespace, name, err.Error())
+		return false
+	}
+	if version == nil {
+		blog.Errorf("Fetch taskgroup(%s) version(%s.%s) is empty", taskgroupID, namespace, name)
+		return false
+	}
+
+	if version.Kind == commtype.BcsDataType_Daemonset {
+		return true
+	}
+	return false
 }

@@ -14,14 +14,14 @@
 package backend
 
 import (
-	"bk-bcs/bcs-common/common/blog"
-	commonTypes "bk-bcs/bcs-common/common/types"
-	sched "bk-bcs/bcs-mesos/bcs-scheduler/src/manager/sched/scheduler"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/manager/store"
-	"bk-bcs/bcs-mesos/bcs-scheduler/src/types"
 	"errors"
+	"github.com/Tencent/bk-bcs/bcs-mesos/bcs-scheduler/src/util"
 	"net/http"
-	//"sort"
+	"time"
+
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	commtypes "github.com/Tencent/bk-bcs/bcs-common/common/types"
+	"github.com/Tencent/bk-bcs/bcs-common/pkg/scheduler/schetypes"
 )
 
 const (
@@ -30,52 +30,21 @@ const (
 
 //RescheduleTaskgroup is used to reschedule taskgroup.
 func (b *backend) RescheduleTaskgroup(taskgroupId string, hostRetainTime int64) error {
-	blog.V(3).Infof("reschedule taskgroup(%s)", taskgroupId)
-
-	runAs, appID := store.GetRunAsAndAppIDbyTaskGroupID(taskgroupId)
-
-	app, err := b.store.FetchApplication(runAs, appID)
-	if err != nil {
-		blog.Error("reschedule taskgroup(%s) fail, fetch application(%s.%s) err:%s", taskgroupId, runAs, appID, err.Error())
-		return err
+	blog.Infof("reschedule taskgroup(%s)", taskgroupId)
+	runAs, appID := types.GetRunAsAndAppIDbyTaskGroupID(taskgroupId)
+	//check taskgroup whether belongs to daemonset
+	if b.sched.CheckPodBelongDaemonset(taskgroupId) {
+		util.Lock.Lock(types.BcsDaemonset{}, runAs+"."+appID)
+		defer util.Lock.UnLock(types.BcsDaemonset{}, runAs+"."+appID)
+	} else {
+		b.store.LockApplication(runAs + "." + appID)
+		defer b.store.UnLockApplication(runAs + "." + appID)
 	}
-
-	if app == nil {
-		blog.Error("reschedule taskgroup(%s) fail, get application(%s.%s) return nil", taskgroupId, runAs, appID)
-		return errors.New("Application not found")
-	}
-	/*if app.Status == types.APP_STATUS_OPERATING {
-		blog.Warn("reschedule taskgroup(%s) fail, application(%s.%s) status(%s) err", taskgroupId, runAs, appID, app.Status)
-		return errors.New("Operation Not Allowed")
-	}
-	if app.Status == types.APP_STATUS_ROLLINGUPDATE && app.SubStatus != types.APP_SUBSTATUS_ROLLINGUPDATE_UP {
-		blog.Error("reschedule taskgroup(%s) fail, application(%s.%s) status(%s:%s) err",
-			taskgroupId, runAs, appID, app.Status, app.SubStatus)
-		return errors.New("operation Not Allowed")
-	}*/
-
-	b.store.LockApplication(runAs + "." + appID)
-	defer b.store.UnLockApplication(runAs + "." + appID)
-
-	//versions, err := b.store.ListVersions(runAs, appID)
-	//if err != nil {
-	//	blog.Error("reschedule taskgroup(%s) fail, list version(%s.%s) err:%s", taskgroupId, runAs, appID, err.Error())
-	//	return err
-	//}
-	//sort.Strings(versions)
-	//newestVersion := versions[len(versions)-1]
-	version, _ := b.store.GetVersion(runAs, appID)
-	if version == nil {
-		blog.Error("reschedule taskgroup(%s) fail, no version for application(%s.%s)", taskgroupId, runAs, appID)
-		return errors.New("application version not exist")
-	}
-
 	taskgroup, err := b.store.FetchTaskGroup(taskgroupId)
 	if err != nil {
 		blog.Errorf("reschedule taskgroup(%s) fail, fetch taskgroup err: %s", taskgroupId, err.Error())
 		return err
 	}
-
 	// here kill taskGroup
 	resp, err := b.sched.KillTaskGroup(taskgroup)
 	if err != nil {
@@ -97,34 +66,53 @@ func (b *backend) RescheduleTaskgroup(taskgroupId string, hostRetainTime int64) 
 			return err
 		}
 	}
-
-	rescheduleTrans := sched.CreateTransaction()
-	rescheduleTrans.RunAs = runAs
-	rescheduleTrans.AppID = appID
-	rescheduleTrans.OpType = types.OPERATION_RESCHEDULE
-	rescheduleTrans.Status = types.OPERATION_STATUS_INIT
-	rescheduleTrans.DelayTime = int64(DefaultRescheduleDelayTime)
-
-	var rescheduleOpdata sched.TransRescheduleOpData
-
-	rescheduleOpdata.TaskGroupID = taskgroup.ID
-	rescheduleOpdata.Force = true
-	rescheduleOpdata.IsInner = false
-	rescheduleOpdata.HostRetainTime = hostRetainTime
-	if rescheduleOpdata.HostRetainTime > 0 {
-		blog.Info("taskgroup(%s) will reschedule retain host(%s) for %d seconds",
-			taskgroup.ID, taskgroup.HostName, rescheduleOpdata.HostRetainTime)
-		rescheduleOpdata.HostRetain = taskgroup.HostName
-	} else {
-		rescheduleOpdata.HostRetainTime = 0
+	//if taskgroup belongs to daemonsets, then don't trigger reschedule transaction
+	if b.sched.CheckPodBelongDaemonset(taskgroupId) {
+		return nil
 	}
 
-	rescheduleOpdata.NeedResource = version.AllResource()
-	rescheduleOpdata.Version = version
+	//trigger taskgroup reschedule
+	version, _ := b.store.GetVersion(runAs, appID)
+	if version == nil {
+		blog.Error("reschedule taskgroup(%s) fail, no version for application(%s.%s)", taskgroupId, runAs, appID)
+		return errors.New("application version not exist")
+	}
 
-	rescheduleTrans.OpData = &rescheduleOpdata
+	rescheduleTrans := &types.Transaction{
+		ObjectKind:    string(commtypes.BcsDataType_APP),
+		ObjectName:    appID,
+		Namespace:     runAs,
+		TransactionID: types.GenerateTransactionID(string(commtypes.BcsDataType_APP)),
+		CreateTime:    time.Now(),
+		CheckInterval: 3 * time.Second,
+		Status:        types.OPERATION_STATUS_INIT,
+	}
+	rescheduleOpdata := &types.TransactionOperartion{
+		OpType: types.TransactionOpTypeReschedule,
+		OpRescheduleData: &types.TransRescheduleOpData{
+			TaskGroupID:    taskgroup.ID,
+			Force:          true,
+			IsInner:        false,
+			HostRetainTime: hostRetainTime,
+		},
+	}
+	if rescheduleOpdata.OpRescheduleData.HostRetainTime > 0 {
+		blog.Info("taskgroup(%s) will rescheduled retain host(%s) for %d seconds",
+			taskgroup.ID, taskgroup.HostName, rescheduleOpdata.OpRescheduleData.HostRetainTime)
+		rescheduleOpdata.OpRescheduleData.HostRetain = taskgroup.HostName
+	} else {
+		rescheduleOpdata.OpRescheduleData.HostRetainTime = 0
+	}
 
-	go b.sched.RunRescheduleTaskgroup(rescheduleTrans)
+	rescheduleOpdata.OpRescheduleData.NeedResource = version.AllResource()
+	rescheduleOpdata.OpRescheduleData.Version = version
+	rescheduleTrans.CurOp = rescheduleOpdata
+
+	if err := b.store.SaveTransaction(rescheduleTrans); err != nil {
+		blog.Errorf("save transaction(%s,%s) into db failed, err %s", runAs, appID, err.Error())
+		return err
+	}
+	b.sched.PushEventQueue(rescheduleTrans)
 
 	return nil
 }
@@ -132,7 +120,7 @@ func (b *backend) RescheduleTaskgroup(taskgroupId string, hostRetainTime int64) 
 // RestartTaskGroup is used to restart process taskGroup. If the taskGroup type is container, then return error.
 func (b *backend) RestartTaskGroup(taskGroupID string) (*types.BcsMessage, error) {
 	blog.V(3).Infof("to restart taskgroup(%s)", taskGroupID)
-	runAs, appID := store.GetRunAsAndAppIDbyTaskGroupID(taskGroupID)
+	runAs, appID := types.GetRunAsAndAppIDbyTaskGroupID(taskGroupID)
 
 	b.store.LockApplication(runAs + "." + appID)
 	defer b.store.UnLockApplication(runAs + "." + appID)
@@ -148,7 +136,7 @@ func (b *backend) RestartTaskGroup(taskGroupID string) (*types.BcsMessage, error
 		return nil, errors.New("application not found")
 	}
 
-	if app.Kind != commonTypes.BcsDataType_PROCESS {
+	if app.Kind != commtypes.BcsDataType_PROCESS {
 		blog.Errorf("restart taskgroup(%s), application(%s.%s), type is %s, restart only for process", taskGroupID, app.RunAs, app.Name, app.Kind)
 		return nil, errors.New("application type is not process")
 	}
@@ -175,7 +163,7 @@ func (b *backend) RestartTaskGroup(taskGroupID string) (*types.BcsMessage, error
 // ReloadTaskGroup is used to reload process taskGroup. If the taskGroup type is container, then return error.
 func (b *backend) ReloadTaskGroup(taskGroupID string) (*types.BcsMessage, error) {
 	blog.V(3).Infof("to reload taskgroup(%s)", taskGroupID)
-	runAs, appID := store.GetRunAsAndAppIDbyTaskGroupID(taskGroupID)
+	runAs, appID := types.GetRunAsAndAppIDbyTaskGroupID(taskGroupID)
 
 	b.store.LockApplication(runAs + "." + appID)
 	defer b.store.UnLockApplication(runAs + "." + appID)
@@ -191,7 +179,7 @@ func (b *backend) ReloadTaskGroup(taskGroupID string) (*types.BcsMessage, error)
 		return nil, errors.New("application not found")
 	}
 
-	if app.Kind != commonTypes.BcsDataType_PROCESS {
+	if app.Kind != commtypes.BcsDataType_PROCESS {
 		blog.Errorf("reload taskgroup(%s), application(%s.%s), type is %s, restart only for process", taskGroupID, app.RunAs, app.Name, app.Kind)
 		return nil, errors.New("application type is not process")
 	}

@@ -14,7 +14,6 @@
 package proxier
 
 import (
-	"bk-bcs/bcs-services/bcs-api/config"
 	"errors"
 	"fmt"
 	"net"
@@ -24,21 +23,23 @@ import (
 	"sync"
 	"time"
 
-	"bk-bcs/bcs-services/bcs-api/pkg/auth"
-	m "bk-bcs/bcs-services/bcs-api/pkg/models"
-	"bk-bcs/bcs-services/bcs-api/pkg/server/credentials"
-	"bk-bcs/bcs-services/bcs-api/pkg/utils"
+	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-api/config"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-api/metric"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-api/pkg/auth"
+	m "github.com/Tencent/bk-bcs/bcs-services/bcs-api/pkg/models"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-api/pkg/server/credentials"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-api/pkg/storages/sqlstore"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-api/pkg/utils"
 
-	"bk-bcs/bcs-common/common/blog"
 	"github.com/google/go-cmp/cmp"
 	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/proxy"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/transport"
 )
-
-const k8sClusterDomainUrl = "https://kubernetes/"
 
 // ReverseProxyDispatcher is the handler which dispatch and proxy the incoming requests to external
 // apiservers.
@@ -54,6 +55,9 @@ type ReverseProxyDispatcher struct {
 	credentialBackends []credentials.CredentialBackend
 
 	availableSrvStore map[string]*UpstreamServer
+
+	wsTunnelStore      map[string]*WsTunnel
+	wsTunnelMutateLock sync.RWMutex
 }
 
 type ClusterHandlerInstance struct {
@@ -67,6 +71,7 @@ func NewReverseProxyDispatcher(clusterVarName, subPathVarName string) *ReversePr
 		SubPathVarName:    subPathVarName,
 		handlerStore:      make(map[string]*ClusterHandlerInstance),
 		availableSrvStore: make(map[string]*UpstreamServer),
+		wsTunnelStore:     make(map[string]*WsTunnel),
 	}
 }
 
@@ -81,10 +86,15 @@ func (f *ReverseProxyDispatcher) Initialize() {
 }
 
 func (f *ReverseProxyDispatcher) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+
+	start := time.Now()
+
 	vars := mux.Vars(req)
 	// Get current cluster object
 	clusterIdentifier := vars[f.ClusterVarName]
 	if clusterIdentifier == "" {
+		metric.RequestErrorCount.WithLabelValues("k8s_native", req.Method).Inc()
+		metric.RequestErrorLatency.WithLabelValues("k8s_native", req.Method).Observe(time.Since(start).Seconds())
 		err := fmt.Errorf("cluster_id is required in path parameters")
 		status := utils.NewInvalid(utils.ClusterGroupKind, "cluster", f.ClusterVarName, err)
 		utils.WriteKubeAPIError(rw, status)
@@ -94,6 +104,8 @@ func (f *ReverseProxyDispatcher) ServeHTTP(rw http.ResponseWriter, req *http.Req
 	// Try to get the clusterId by given clusterIdentifier
 	cluster := f.GetCluster(clusterIdentifier)
 	if cluster == nil {
+		metric.RequestErrorCount.WithLabelValues("k8s_native", req.Method).Inc()
+		metric.RequestErrorLatency.WithLabelValues("k8s_native", req.Method).Observe(time.Since(start).Seconds())
 		message := "no cluster can be found using given cluster identifier"
 		status := utils.NewNotFound(utils.ClusterResource, clusterIdentifier, message)
 		utils.WriteKubeAPIError(rw, status)
@@ -109,11 +121,15 @@ func (f *ReverseProxyDispatcher) ServeHTTP(rw http.ResponseWriter, req *http.Req
 
 	user, hasExpired := authenticater.GetUser()
 	if user == nil {
+		metric.RequestErrorCount.WithLabelValues("k8s_native", req.Method).Inc()
+		metric.RequestErrorLatency.WithLabelValues("k8s_native", req.Method).Observe(time.Since(start).Seconds())
 		status := utils.NewUnauthorized("anonymous requests is forbidden")
 		utils.WriteKubeAPIError(rw, status)
 		return
 	}
 	if hasExpired {
+		metric.RequestErrorCount.WithLabelValues("k8s_native", req.Method).Inc()
+		metric.RequestErrorLatency.WithLabelValues("k8s_native", req.Method).Observe(time.Since(start).Seconds())
 		reason := fmt.Sprintf("this token has expired for user: %s", user.Name)
 		status := utils.NewUnauthorized(reason)
 		utils.WriteKubeAPIError(rw, status)
@@ -123,6 +139,46 @@ func (f *ReverseProxyDispatcher) ServeHTTP(rw http.ResponseWriter, req *http.Req
 	// Delete the original auth header so that the original user token won't be passed to the rev-proxy request and
 	// damage the real cluster authentication process.
 	delete(req.Header, "Authorization")
+
+	var proxyHandler *ClusterHandlerInstance
+	// 先从websocket dialer缓存中查找websocket链
+	websocketHandler, found, err := f.lookupWsHandler(clusterId, req)
+	if err != nil {
+		blog.Errorf("error when lookup websocket conn: %s", err.Error())
+		err := fmt.Errorf("error when lookup websocket conn: %s", err.Error())
+		status := utils.NewInternalError(err)
+		status.ErrStatus.Reason = "CREATE_TUNNEL_ERROR"
+		utils.WriteKubeAPIError(rw, status)
+		return
+	}
+	if found {
+		blog.Info("found websocket conn for cluster %s", clusterId)
+		handlerServer := stripLeaveSlash(f.ExtractPathPrefix(req), websocketHandler)
+		proxyHandler = &ClusterHandlerInstance{
+			Handler: handlerServer,
+		}
+		credentials := sqlstore.GetWsCredentials(clusterId)
+		bearerToken := "Bearer " + credentials.UserToken
+		req.Header.Set("Authorization", bearerToken)
+	} else {
+		// Try not to initialize the handler everytime by using a map to store all the initialized handler
+		// Use RWLock to fix race condition
+		f.handlerMutateLock.Lock()
+		if f.handlerStore[clusterId] == nil {
+			handlerServer, err := f.InitializeHandlerForCluster(clusterId, req)
+			if err != nil {
+				err = fmt.Errorf("error when creating proxy channel: %s", err.Error())
+				status := utils.NewInternalError(err)
+				status.ErrStatus.Reason = "CREATE_TUNNEL_ERROR"
+				utils.WriteKubeAPIError(rw, status)
+				f.handlerMutateLock.Unlock()
+				return
+			}
+			f.handlerStore[clusterId] = handlerServer
+		}
+		proxyHandler = f.handlerStore[clusterId]
+		f.handlerMutateLock.Unlock()
+	}
 
 	// Add the user name to Header to pass to k8s cluster, implement the user Impersonate feature
 	// Because k8s rbac doesn't allow label to contain ":", so replaced by "."
@@ -137,33 +193,15 @@ func (f *ReverseProxyDispatcher) ServeHTTP(rw http.ResponseWriter, req *http.Req
 	// bke-server instance?
 	req.URL.Scheme = "https"
 
-	// Try not to initialize the handler everytime by using a map to store all the initialized handler
-	f.handlerMutateLock.RLock()
-	existedHander := f.handlerStore[clusterId]
-	f.handlerMutateLock.RUnlock()
-	if existedHander != nil {
-		existedHander.Handler.ServeHTTP(rw, req)
-		return
+	if websocket.IsWebSocketUpgrade(req) {
+		metric.RequestCount.WithLabelValues("k8s_native", "websocket").Inc()
+		metric.RequestLatency.WithLabelValues("k8s_native", "websocket").Observe(time.Since(start).Seconds())
 	}
-
-	// Use RWLock to fix race condition
-	f.handlerMutateLock.Lock()
-	if f.handlerStore[clusterId] == nil {
-		handlerServer, err := f.InitializeHandlerForCluster(clusterId, req)
-		if err != nil {
-			err = fmt.Errorf("error when creating proxy channel: %s", err.Error())
-			status := utils.NewInternalError(err)
-			status.ErrStatus.Reason = "CREATE_TUNNEL_ERROR"
-			utils.WriteKubeAPIError(rw, status)
-			f.handlerMutateLock.Unlock()
-			return
-		}
-		f.handlerStore[clusterId] = handlerServer
-	}
-	f.handlerMutateLock.Unlock()
-
-	proxyHandler := f.handlerStore[clusterId]
 	proxyHandler.Handler.ServeHTTP(rw, req)
+	if !websocket.IsWebSocketUpgrade(req) {
+		metric.RequestCount.WithLabelValues("k8s_native", req.Method).Inc()
+		metric.RequestLatency.WithLabelValues("k8s_native", req.Method).Observe(time.Since(start).Seconds())
+	}
 	return
 }
 
@@ -189,6 +227,7 @@ func (f *ReverseProxyDispatcher) InitializeUpstreamServer(clusterId string, serv
 // other cases when we may also need to re-establish the apiserver connection. This includes apiserver connection
 // failure or apiserver addresses's major changes.
 func (f *ReverseProxyDispatcher) InitializeHandlerForCluster(clusterId string, req *http.Request) (*ClusterHandlerInstance, error) {
+
 	// Query for the cluster credentials
 	clusterCredentials := f.GetClusterCredentials(clusterId)
 	if clusterCredentials == nil || clusterCredentials.ServerAddresses == "" {
@@ -202,8 +241,6 @@ func (f *ReverseProxyDispatcher) InitializeHandlerForCluster(clusterId string, r
 	clusterCredentials.ServerAddresses = f.availableSrvStore[clusterId].GetAvailableServer()
 	blog.Infof("Init new proxy handler for %s, using address: %s", clusterId, clusterCredentials.ServerAddresses)
 	restConfig, err := TurnCredentialsIntoConfig(clusterCredentials)
-	blog.Debug(fmt.Sprintf("TurnCredentialsIntoConfig restConfig is: Host=%s, BearerToken=%s, TLSClientConfig=%v",
-		restConfig.Host, restConfig.BearerToken, restConfig.TLSClientConfig))
 	if err != nil {
 		blog.Errorf("TurnCredentialsIntoConfig failed: %s", err.Error())
 		return nil, fmt.Errorf("error when turning credentials into restconfig: %s", err.Error())
@@ -225,6 +262,7 @@ func (f *ReverseProxyDispatcher) InitializeHandlerForCluster(clusterId string, r
 
 func (f *ReverseProxyDispatcher) StartClusterAddressesPoller(clusterId string) {
 	refreshTicker := time.NewTicker(60 * time.Second)
+	defer refreshTicker.Stop()
 	upstreamServer := f.availableSrvStore[clusterId]
 	for {
 		select {
@@ -297,10 +335,11 @@ func (r *responder) Error(w http.ResponseWriter, req *http.Request, err error) {
 
 // NewProxyHandler creates a new proxy handler to a single api server based on the given kube config object
 func NewProxyHandlerFromConfig(config *rest.Config) (*proxy.UpgradeAwareHandler, error) {
-	// Nowadays our k8s cluster certificates initiated only for initial master ip addresses and some domains such as "kubernetes". If a master
-	// is replaced when failover, the cluster will can't be accessed with the new master's ip address because of the certificate.
-	// to fix this issue, here use the domain "kubernetes" to access all bcs k8s clusters
-	host := k8sClusterDomainUrl
+
+	host := config.Host
+	if !strings.HasSuffix(host, "/") {
+		host = host + "/"
+	}
 	target, err := url.Parse(host)
 	if err != nil {
 		return nil, err

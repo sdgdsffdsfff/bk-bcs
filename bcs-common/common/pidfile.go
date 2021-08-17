@@ -21,11 +21,12 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"bk-bcs/bcs-common/common/conf"
+	"github.com/Tencent/bk-bcs/bcs-common/common/conf"
 )
 
 var pidfile string
 
+// SavePid common func for save proc pid
 func SavePid(processConfig conf.ProcessConfig) error {
 	pidPath := filepath.Join(processConfig.PidDir, filepath.Base(os.Args[0])+".pid")
 	if fi, err := os.Stat(pidPath); err == nil && !fi.IsDir() {

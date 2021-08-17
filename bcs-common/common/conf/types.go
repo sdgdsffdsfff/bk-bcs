@@ -23,8 +23,8 @@ import (
 	"strings"
 	"unsafe"
 
-	"bk-bcs/bcs-common/common/codec"
-	"bk-bcs/bcs-common/common/util"
+	"github.com/Tencent/bk-bcs/bcs-common/common/codec"
+	"github.com/Tencent/bk-bcs/bcs-common/common/util"
 
 	simplejson "github.com/bitly/go-simplejson"
 	"github.com/spf13/pflag"
@@ -32,7 +32,7 @@ import (
 
 // FileConfig Config file, if set it will cover all the flag value it contains
 type FileConfig struct {
-	ConfigFile  string `json:"file" short:"f" value:"" usage:"json file with configuration"`
+	ConfigFile string `json:"file" short:"f" value:"" usage:"json file with configuration"`
 }
 
 // LogConfig Log configuration
@@ -57,14 +57,19 @@ type ProcessConfig struct {
 // ServiceConfig Service bind
 type ServiceConfig struct {
 	Address         string `json:"address" short:"a" value:"127.0.0.1" usage:"IP address to listen on for this service" mapstructure:"address"`
+	IPv6Address     string `json:"ipv6_address" value:"" usage:"IPv6 address to listen on for this service" mapstructure:"ipv6_address"`
 	Port            uint   `json:"port" short:"p" value:"8080" usage:"Port to listen on for this service" mapstructure:"port"`
-	InsecureAddress string `json:"insecure_address" value:"127.0.0.1" usage:"insecure IP address to listen on for this service" mapstructure:"insecure_address"`
-	InsecurePort    uint   `json:"insecure_port" value:"8443" usage:"insecure port to listen on for this service" mapstructure:"insecure_port"`
+	InsecureAddress string `json:"insecure_address" value:"" usage:"insecure IP address to listen on for this service" mapstructure:"insecure_address"`
+	InsecurePort    uint   `json:"insecure_port" value:"" usage:"insecure port to listen on for this service" mapstructure:"insecure_port"`
+	ExternalIp      string `json:"external_ip" value:"" usage:"external IP address to listen on for this service" mapstructure:"external_ip"`
+	ExternalIPv6    string `json:"external_ipv6" value:"" usage:"external IPv6 address to listen on for this service" mapstructure:"external_ipv6"`
+	ExternalPort    uint   `json:"external_port" value:"" usage:"external port to listen on for this service" mapstructure:"external_port"`
 }
 
 // LocalConfig Local info
 type LocalConfig struct {
-	LocalIP string `json:"local_ip" value:"" usage:"IP address of this host" mapstructure:"local_ip"`
+	LocalIP   string `json:"local_ip" value:"" usage:"IP address of this host" mapstructure:"local_ip"`
+	LocalIPv6 string `json:"local_ipv6" value:"" usage:"IPv6 address of this host" mapstructure:"local_ipv6"`
 }
 
 // MetricConfig Metric info
@@ -74,7 +79,8 @@ type MetricConfig struct {
 
 // ZkConfig bcs zookeeper for service discovery
 type ZkConfig struct {
-	BCSZk string `json:"bcs_zookeeper" value:"127.0.0.1:2181" usage:"Zookeeper server for registering and discovering" mapstructure:"bcs_zookeeper" `
+	BCSZk     string `json:"bcs_zookeeper" value:"127.0.0.1:2181" usage:"Zookeeper server for registering and discovering" mapstructure:"bcs_zookeeper" `
+	BCSZKIPv6 string `json:"bcs_zookeeper_ipv6" value:"" usage:"Zookeeper server ipv6 address for registering and discovering" mapstructure:"bcs_zookeeper_ipv6" `
 }
 
 // CertConfig Server and client TLS config, can not be import with ClientCertOnlyConfig or ServerCertOnlyConfig

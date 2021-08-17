@@ -14,13 +14,20 @@
 package deployment
 
 import (
-	"bk-bcs/bcs-services/bcs-client/cmd/utils"
-	"bk-bcs/bcs-services/bcs-client/pkg/scheduler/v4"
 	"fmt"
+
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-client/cmd/utils"
+	v4 "github.com/Tencent/bk-bcs/bcs-services/bcs-client/pkg/scheduler/v4"
 
 	"github.com/urfave/cli"
 )
 
+var (
+	deploy     = "deploy"
+	deployment = "deployment"
+)
+
+//NewResumeCommand resume deployment command
 func NewResumeCommand() cli.Command {
 	return cli.Command{
 		Name:  "resume",
@@ -29,6 +36,10 @@ func NewResumeCommand() cli.Command {
 			cli.StringFlag{
 				Name:  "type, t",
 				Usage: "Resume type, deployment",
+			},
+			cli.StringFlag{
+				Name:  "clusterid",
+				Usage: "Cluster ID",
 			},
 			cli.StringFlag{
 				Name:  "name, n",
@@ -41,10 +52,7 @@ func NewResumeCommand() cli.Command {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			if err := resume(utils.NewClientContext(c)); err != nil {
-				return err
-			}
-			return nil
+			return resume(utils.NewClientContext(c))
 		},
 	}
 }
@@ -57,7 +65,7 @@ func resume(c *utils.ClientContext) error {
 	resourceType := c.String(utils.OptionType)
 
 	switch resourceType {
-	case "deploy", "deployment":
+	case deploy, deployment:
 		return resumeDeployment(c)
 	default:
 		return fmt.Errorf("invalid type: %s", resourceType)
